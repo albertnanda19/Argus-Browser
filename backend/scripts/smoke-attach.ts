@@ -6,8 +6,8 @@ import { promisify } from "node:util";
 import type { Profile } from "../../shared/profile";
 import { resolveAppDataDir } from "../app-data";
 import {
-  createCdpLaunchArguments,
   launchBrowser,
+  type BrowserPage,
   type BrowserSessionContext,
 } from "../browser-launcher";
 import { createChromeInstaller } from "../chrome-installer";
@@ -18,35 +18,20 @@ import {
   ProfileStoreError,
   resolveProfileDir,
 } from "../profile-store";
+import { createProviderRegistry } from "../provider-registry";
+import type { ProviderService } from "../provider-service";
+import type { StoredProviderConfig } from "../provider-store";
+import { createStagehandAgent, type StagehandAgent } from "../stagehand-agent";
 
 const execFileAsync = promisify(execFile);
 const PROCESS_TIMEOUT_MS = 10_000;
 const PROCESS_POLL_MS = 100;
 const CLEANUP_TIMEOUT_MS = 5_000;
-const SNAPSHOT_TIMEOUT_MS = 10_000;
+const PAGE_TIMEOUT_MS = 10_000;
+const CDP_PROBE_TIMEOUT_MS = 2_000;
 const SMOKE_PAGE_HTML =
   "<main><h1>Argus attach smoke</h1><button>Lanjut</button></main>";
-
-type StagehandPage = {
-  goto(url: string): Promise<unknown>;
-  url(): Promise<string>;
-  snapshot(options?: {
-    readonly timeout?: number;
-  }): Promise<{ readonly formattedTree: string }>;
-};
-
-type StagehandBrowser = {
-  close(): Promise<void>;
-  readonly context: {
-    pages(): Promise<StagehandPage[]>;
-    newPage(url?: string): Promise<StagehandPage>;
-  };
-};
-
-type StagehandInstance = {
-  close(): Promise<void>;
-  readonly browser: StagehandBrowser;
-};
+const SMOKE_API_KEY = "smoke-placeholder-key";
 
 type SmokeState = {
   readonly tempRoot: string;
@@ -55,8 +40,7 @@ type SmokeState = {
   profile: Profile | null;
   profileDir: string | null;
   context: BrowserSessionContext | null;
-  stagehand: StagehandInstance | null;
-  stagehandBrowser: StagehandBrowser | null;
+  agent: StagehandAgent | null;
   isProfileDeleted: boolean;
 };
 
@@ -184,6 +168,49 @@ async function resolveUserChrome(): Promise<string> {
   return executablePath;
 }
 
+function createSmokeProviders(): ProviderService {
+  const config: StoredProviderConfig = {
+    provider: "gemini",
+    model: "smoke-model",
+    apiKey: SMOKE_API_KEY,
+    updatedAt: new Date(0).toISOString(),
+  };
+
+  return {
+    getConfig: () => ({
+      provider: config.provider,
+      model: config.model,
+      configured: true,
+      updatedAt: config.updatedAt,
+    }),
+    getActive: () => ({ ...config }),
+    async setConfig() {
+      throw new Error("Smoke provider configuration is read-only.");
+    },
+  };
+}
+
+async function readActivePage(context: BrowserSessionContext): Promise<BrowserPage> {
+  return context.pages().at(-1) ?? (await context.newPage());
+}
+
+async function assertChromeIsAlive(
+  cdpUrl: string,
+  context: BrowserSessionContext,
+): Promise<void> {
+  const response = await fetch(`${cdpUrl}/json/version`, {
+    signal: AbortSignal.timeout(CDP_PROBE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`CDP endpoint responded with status ${response.status} after adapter close.`);
+  }
+
+  const pages = context.pages();
+  if (pages.length === 0) {
+    throw new Error("Chrome has no readable page after adapter close.");
+  }
+}
+
 async function runSteps(state: SmokeState): Promise<void> {
   console.log(`tmp root: ${state.tempRoot}`);
   if (process.env.ARGUS_APP_DATA_DIR) {
@@ -208,55 +235,40 @@ async function runSteps(state: SmokeState): Promise<void> {
   console.log("step 3: launch Argus browser with CDP");
   const launched = await launchBrowser({ executablePath, userDataDir: profileDir });
   state.context = launched.context;
-  const port = Number(new URL(launched.cdpUrl).port);
-  const launchArguments = createCdpLaunchArguments(port);
-  console.log(`cdp url: ${launched.cdpUrl}`);
-  console.log(`launch args: ${launchArguments.args.join(" ")}`);
-  console.log(`ignored default args: ${launchArguments.ignoreDefaultArgs.join(" ")}`);
   console.log("launch: PASS");
 
-  console.log("step 4: connect Stagehand over CDP");
-  const { localBrowser, Stagehand } = await import("@browserbasehq/stagehand");
-  let stagehandBrowser: Awaited<ReturnType<typeof localBrowser.connect>>;
-  try {
-    stagehandBrowser = await localBrowser.connect({ cdpUrl: launched.cdpUrl });
-  } catch (error) {
-    console.error(`stagehand attach failed: ${describeError(error)}`);
-    console.error(`launch args: ${launchArguments.args.join(" ")}`);
-    console.error(`ignored default args: ${launchArguments.ignoreDefaultArgs.join(" ")}`);
-    throw error;
-  }
-  state.stagehandBrowser = stagehandBrowser;
-  console.log("stagehand attach: PASS");
+  console.log("step 4: create the Stagehand adapter with a fake provider configuration");
+  const agent = await createStagehandAgent({
+    cdpUrl: launched.cdpUrl,
+    providers: createSmokeProviders(),
+    registry: createProviderRegistry(),
+  });
+  state.agent = agent;
+  console.log("stagehand adapter: PASS (no model call)");
 
-  console.log("step 5: create Stagehand without a model");
-  let stagehand: StagehandInstance;
-  try {
-    stagehand = await Stagehand.create({ browser: stagehandBrowser });
-  } catch (error) {
-    console.error(`stagehand create failed: ${describeError(error)}`);
-    console.error(`launch args: ${launchArguments.args.join(" ")}`);
-    console.error(`ignored default args: ${launchArguments.ignoreDefaultArgs.join(" ")}`);
-    throw error;
-  }
-  state.stagehand = stagehand;
-  console.log("stagehand create: PASS (no model, no API key)");
+  console.log("step 5: read the active Argus page");
+  const page = await readActivePage(launched.context);
+  await page.goto(`data:text/html,${encodeURIComponent(SMOKE_PAGE_HTML)}`, {
+    timeout: PAGE_TIMEOUT_MS,
+  });
+  console.log(`page url: ${page.url()}`);
+  console.log("page: PASS");
 
-  console.log("step 6: read the Stagehand page");
-  const pages = await stagehand.browser.context.pages();
-  const page = pages[0] ?? (await stagehand.browser.context.newPage("about:blank"));
-  await page.goto(`data:text/html,${encodeURIComponent(SMOKE_PAGE_HTML)}`);
-  console.log(`stagehand page url: ${await page.url()}`);
-  console.log("stagehand page: PASS");
-
-  console.log("step 7: capture accessibility snapshot");
-  const snapshot = await page.snapshot({ timeout: SNAPSHOT_TIMEOUT_MS });
+  console.log("step 6: capture accessibility snapshot through the adapter");
+  const snapshot = await agent.snapshot();
   const tree = snapshot.formattedTree.trim();
   if (tree.length === 0) {
-    throw new Error("Stagehand snapshot formattedTree is empty.");
+    throw new Error("Adapter snapshot formattedTree is empty.");
   }
   console.log(`formattedTree length: ${tree.length}`);
-  console.log("stagehand snapshot: PASS");
+  console.log("adapter snapshot: PASS");
+
+  console.log("step 7: close the adapter and prove Chrome is still alive");
+  await agent.close();
+  state.agent = null;
+  console.log("adapter close: PASS");
+  await assertChromeIsAlive(launched.cdpUrl, launched.context);
+  console.log("chrome after adapter close: PASS (CDP responds, page still readable)");
 }
 
 async function cleanup(state: SmokeState): Promise<unknown> {
@@ -267,23 +279,11 @@ async function cleanup(state: SmokeState): Promise<unknown> {
     console.error(`cleanup: FAIL ${describeError(error)}`);
   };
 
-  if (state.stagehand !== null) {
+  if (state.agent !== null) {
     try {
-      await withTimeout(state.stagehand.close(), CLEANUP_TIMEOUT_MS);
-      state.stagehand = null;
-      console.log("cleanup: closed Stagehand instance");
-    } catch (error) {
-      record(error);
-    }
-  }
-
-  let isBrowserClosed = false;
-  if (state.stagehandBrowser !== null) {
-    try {
-      await withTimeout(state.stagehandBrowser.close(), CLEANUP_TIMEOUT_MS);
-      state.stagehandBrowser = null;
-      isBrowserClosed = true;
-      console.log("cleanup: closed Stagehand browser");
+      await withTimeout(state.agent.close(), CLEANUP_TIMEOUT_MS);
+      state.agent = null;
+      console.log("cleanup: closed Stagehand adapter");
     } catch (error) {
       record(error);
     }
@@ -295,9 +295,7 @@ async function cleanup(state: SmokeState): Promise<unknown> {
       state.context = null;
       console.log("cleanup: closed browser context");
     } catch (error) {
-      if (!isBrowserClosed) {
-        record(error);
-      }
+      record(error);
     }
   }
 
@@ -353,8 +351,7 @@ async function run(): Promise<void> {
     profile: null,
     profileDir: null,
     context: null,
-    stagehand: null,
-    stagehandBrowser: null,
+    agent: null,
     isProfileDeleted: false,
   };
 
