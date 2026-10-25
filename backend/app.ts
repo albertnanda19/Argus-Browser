@@ -26,6 +26,8 @@ import type { ChromeLocalValidation } from "./chrome-local-binary";
 import { ChromeFailure } from "./chrome-errors";
 import { isAuthorized } from "./auth";
 import { handleKnownError, INTERNAL_ERROR_DETAIL, problemResponse } from "./api-problem";
+import type { EventBus } from "./event-bus";
+import { createEventStream, type EventStreamRegistry } from "./event-stream";
 import { createProfileLock } from "./profile-lock";
 import type { TaskService } from "./task-manager";
 
@@ -64,6 +66,9 @@ export type AppOptions = {
   readonly profiles: ProfileService;
   readonly sessions: SessionService;
   readonly tasks: TaskService;
+  readonly events: EventBus;
+  readonly eventConnections: EventStreamRegistry;
+  readonly eventHeartbeatMs?: number;
 };
 
 type ParsedBody<T> = { readonly ok: true; readonly data: T } | { readonly ok: false };
@@ -128,6 +133,11 @@ function paginate<T>(items: readonly T[], page: number, pageSize: number) {
 export function createApp(options: AppOptions): Hono {
   const app = new Hono();
   const profileLock = createProfileLock();
+  const eventStream = createEventStream({
+    events: options.events,
+    connections: options.eventConnections,
+    heartbeatMs: options.eventHeartbeatMs,
+  });
 
   app.use("/v1/*", async (c, next) => {
     const origin = c.req.header("Origin");
@@ -135,7 +145,10 @@ export function createApp(options: AppOptions): Hono {
     if (origin !== undefined && origin === options.allowedOrigin) {
       c.header("Access-Control-Allow-Origin", origin);
       c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-      c.header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key");
+      c.header(
+        "Access-Control-Allow-Headers",
+        "Authorization, Content-Type, Idempotency-Key, Last-Event-ID",
+      );
       c.header("Access-Control-Max-Age", "600");
       c.header("Vary", "Origin");
     }
@@ -403,6 +416,20 @@ export function createApp(options: AppOptions): Hono {
     } catch (error) {
       return handleKnownError(c, error);
     }
+  });
+
+  app.get("/v1/events", (c) => {
+    const rawTaskId = c.req.query("taskId");
+    if (rawTaskId === undefined) {
+      return eventStream.open(c, undefined);
+    }
+
+    const parsedTaskId = taskIdSchema.safeParse(rawTaskId);
+    if (!parsedTaskId.success) {
+      return problemResponse(c, 400, "Id task tidak valid.");
+    }
+
+    return eventStream.open(c, parsedTaskId.data);
   });
 
   app.notFound((c) => problemResponse(c, 404, "Endpoint tidak ditemukan."));

@@ -12,6 +12,7 @@ export type EventListener = (event: StoredEvent) => void;
 export type EventBus = {
   publish(event: DomainEvent): StoredEvent;
   subscribe(listener: EventListener): () => void;
+  subscriberCount(): number;
   list(): readonly StoredEvent[];
 };
 
@@ -45,6 +46,10 @@ class EventBusImpl implements EventBus {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  subscriberCount(): number {
+    return this.listeners.size;
   }
 
   list(): readonly StoredEvent[] {

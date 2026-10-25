@@ -5,6 +5,7 @@ import type { Session } from "../shared/session";
 import type { Task } from "../shared/task";
 import { createApp, type ProfileService, type SessionService } from "./app";
 import { createEventBus } from "./event-bus";
+import { createEventStreamRegistry } from "./event-stream";
 import { createTaskManager } from "./task-manager";
 
 const token = "test-token";
@@ -77,6 +78,8 @@ function createHarness() {
     profiles: profilesService,
     sessions: sessionsService,
     tasks,
+    events,
+    eventConnections: createEventStreamRegistry(),
   });
 
   return {

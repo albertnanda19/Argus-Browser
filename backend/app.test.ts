@@ -6,6 +6,7 @@ import type { Profile } from "../shared/profile";
 import type { Session, SessionStatus } from "../shared/session";
 import { createApp } from "./app";
 import { createEventBus } from "./event-bus";
+import { createEventStreamRegistry } from "./event-stream";
 import { ProfileStoreError } from "./profile-store";
 import { SessionError } from "./session-errors";
 import { createTaskManager } from "./task-manager";
@@ -162,9 +163,10 @@ function createHarness(
   const installer = createFakeInstaller();
   const profiles = createFakeProfiles();
   const sessions = createFakeSessions();
+  const events = createEventBus();
   const tasks = createTaskManager({
     sessions: sessions.service,
-    events: createEventBus(),
+    events,
     now: () => new Date(now),
   });
 
@@ -175,6 +177,8 @@ function createHarness(
     profiles: overrides.profiles ?? profiles.service,
     sessions: overrides.sessions ?? sessions.service,
     tasks,
+    events,
+    eventConnections: createEventStreamRegistry(),
   });
 
   return { app, installer, profiles, sessions };

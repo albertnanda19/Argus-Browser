@@ -6,6 +6,7 @@ import { resolveAppDataDir, writeApiCredentials } from "./app-data";
 import { createChromeInstaller } from "./chrome-installer";
 import { ChromeFailure } from "./chrome-errors";
 import { createEventBus } from "./event-bus";
+import { createEventStreamRegistry } from "./event-stream";
 import { createProfile, deleteProfile, listProfiles } from "./profile-store";
 import { createSessionManager } from "./session-manager";
 import { createTaskManager } from "./task-manager";
@@ -28,7 +29,9 @@ async function main(): Promise<void> {
   await chromeInstaller.initialize();
 
   const sessionManager = createSessionManager({ appDataDir, chromeInstaller });
-  const tasks = createTaskManager({ sessions: sessionManager, events: createEventBus() });
+  const events = createEventBus();
+  const eventConnections = createEventStreamRegistry();
+  const tasks = createTaskManager({ sessions: sessionManager, events });
 
   const profiles: ProfileService = {
     list: () => listProfiles(appDataDir),
@@ -38,7 +41,16 @@ async function main(): Promise<void> {
   const sessions: SessionService = sessionManager;
 
   const server = serve({
-    fetch: createApp({ token, allowedOrigin, chromeInstaller, profiles, sessions, tasks }).fetch,
+    fetch: createApp({
+      token,
+      allowedOrigin,
+      chromeInstaller,
+      profiles,
+      sessions,
+      tasks,
+      events,
+      eventConnections,
+    }).fetch,
     hostname: "127.0.0.1",
     port: 0,
   });
@@ -62,6 +74,7 @@ async function main(): Promise<void> {
     const forceExit = setTimeout(() => process.exit(0), SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
     server.close();
+    eventConnections.shutdown();
 
     const stop = async (): Promise<void> => {
       await sessionManager.shutdown().catch((error: unknown) => {
