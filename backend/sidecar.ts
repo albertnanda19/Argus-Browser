@@ -50,6 +50,7 @@ async function main(): Promise<void> {
     providers,
     registry,
     steps,
+    events,
   });
 
   const profiles: ProfileService = {
@@ -67,6 +68,7 @@ async function main(): Promise<void> {
       profiles,
       sessions,
       tasks,
+      steps: { listByTask: (taskId) => steps.list(taskId) },
       runner,
       actions,
       events,

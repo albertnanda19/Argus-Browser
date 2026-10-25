@@ -7,6 +7,7 @@ import {
   type AgentStepVerification,
 } from "./agent-steps";
 import type { BrowserSessionContext } from "./browser-launcher";
+import type { EventBus } from "./event-bus";
 import { isIrreversibleAction } from "./irreversible-actions";
 import type { ProviderRegistry } from "./provider-registry";
 import type { ProviderService } from "./provider-service";
@@ -57,6 +58,7 @@ export type TaskRunnerOptions = {
   readonly providers: ProviderService;
   readonly registry: ProviderRegistry;
   readonly steps: AgentStepStore;
+  readonly events: EventBus;
   readonly createAgent?: TaskAgentFactory;
   readonly now?: () => Date;
   readonly maxSteps?: number;
@@ -268,6 +270,7 @@ class TaskRunnerImpl implements TaskRunner {
   private readonly sessions: TaskSessionSource;
   private readonly tasks: TaskService;
   private readonly steps: AgentStepStore;
+  private readonly events: EventBus;
   private readonly createAgent: TaskAgentFactory;
   private readonly now: () => Date;
   private readonly maxSteps: number;
@@ -284,6 +287,7 @@ class TaskRunnerImpl implements TaskRunner {
     this.sessions = options.sessions;
     this.tasks = options.tasks;
     this.steps = options.steps;
+    this.events = options.events;
     this.now = options.now ?? (() => new Date());
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
@@ -830,7 +834,7 @@ class TaskRunnerImpl implements TaskRunner {
   }
 
   private recordStep(input: RecordStepInput): void {
-    this.steps.add({
+    const step = this.steps.add({
       taskId: input.record.taskId,
       action: input.action,
       target: input.target,
@@ -844,6 +848,17 @@ class TaskRunnerImpl implements TaskRunner {
         pageChanged: input.pageChanged,
         verification: input.verification,
       },
+    });
+
+    this.events.publish({
+      type: "agent.step",
+      taskId: step.taskId,
+      index: step.index,
+      action: step.action,
+      target: step.target,
+      status: step.result.status,
+      url: step.result.url,
+      at: this.now().toISOString(),
     });
   }
 

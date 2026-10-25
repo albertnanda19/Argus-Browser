@@ -94,6 +94,7 @@ function createHarness(initial: ProviderConfig = unconfigured) {
     profiles,
     sessions,
     tasks: createTaskManager({ sessions, events, now: () => new Date(fixedNow) }),
+    steps: { listByTask: () => [] },
     runner: {
       start: () => undefined,
       cancel: () => undefined,

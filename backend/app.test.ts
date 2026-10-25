@@ -177,6 +177,7 @@ function createHarness(
     profiles: overrides.profiles ?? profiles.service,
     sessions: overrides.sessions ?? sessions.service,
     tasks,
+    steps: { listByTask: () => [] },
     runner: {
       start: () => undefined,
       cancel: () => undefined,

@@ -2,6 +2,10 @@ import { Hono, type Context } from "hono";
 import type { ZodType } from "zod";
 import { actionRequestSchema, actionResponseSchema } from "../shared/action";
 import {
+  agentStepListResponseSchema,
+  type AgentStep,
+} from "../shared/agent-step";
+import {
   approvalDecisionRequestSchema,
   approvalResponseSchema,
   browserStateResponseSchema,
@@ -78,6 +82,10 @@ export type TaskRunnerApi = {
   cancel(taskId: string): void;
 };
 
+export type AgentStepService = {
+  listByTask(taskId: string): readonly AgentStep[];
+};
+
 export type AppOptions = {
   readonly token: string;
   readonly allowedOrigin: string;
@@ -85,6 +93,7 @@ export type AppOptions = {
   readonly profiles: ProfileService;
   readonly sessions: SessionService;
   readonly tasks: TaskService;
+  readonly steps: AgentStepService;
   readonly runner: TaskRunnerApi;
   readonly actions: ActionService;
   readonly events: EventBus;
@@ -447,6 +456,31 @@ export function createApp(options: AppOptions): Hono {
     }
 
     return c.json(taskResponseSchema.parse({ data: task }), 200);
+  });
+
+  app.get("/v1/tasks/:id/steps", (c) => {
+    const parsedId = taskIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id task tidak valid.");
+    }
+
+    const pagination = parsePagination(c);
+    if (pagination === null) {
+      return problemResponse(c, 400, "Parameter pagination tidak valid.");
+    }
+
+    if (options.tasks.getTask(parsedId.data) === null) {
+      return problemResponse(c, 404, "Task tidak ditemukan.");
+    }
+
+    const steps = options.steps
+      .listByTask(parsedId.data)
+      .slice()
+      .sort((left, right) => left.index - right.index);
+    const body = agentStepListResponseSchema.parse(
+      paginate(steps, pagination.page, pagination.page_size),
+    );
+    return c.json(body, 200);
   });
 
   app.post("/v1/tasks/:id/cancel", (c) => {

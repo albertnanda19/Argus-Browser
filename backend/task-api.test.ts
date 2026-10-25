@@ -82,6 +82,7 @@ function createHarness() {
     profiles: profilesService,
     sessions: sessionsService,
     tasks,
+    steps: { listByTask: () => [] },
     runner,
     actions: {
       execute: async () => {

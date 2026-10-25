@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ActionResponse } from "./action";
+import type { AgentStep, AgentStepListResponse } from "./agent-step";
 import type {
   ApprovalResponse,
   ProfileListResponse,
@@ -93,6 +94,32 @@ const waitingTask: Task = { ...task, status: "waiting_approval" };
 const cancelledTask: Task = { ...task, status: "cancelled", completedAt: timestamp };
 
 const taskResponse: TaskResponse = { data: task };
+
+const agentStep: AgentStep = {
+  id: "st_0000000000000001",
+  taskId,
+  index: 1,
+  action: "click",
+  target: "Buka kontak",
+  result: {
+    status: "done",
+    url: "https://example.test/kontak",
+    pageChanged: true,
+    verification: {
+      stepOk: true,
+      goalComplete: false,
+      reason: "Halaman berubah.",
+    },
+  },
+  durationMs: 812,
+};
+
+const agentStepList: AgentStepListResponse = {
+  data: [agentStep],
+  total: 1,
+  page: 1,
+  page_size: 20,
+};
 
 const approval: Approval = {
   id: approvalId,
@@ -206,6 +233,7 @@ function routeResponse(method: string, pathname: string): Response {
     return jsonResponse(taskResponse, 202);
   }
   if (key === `GET /v1/tasks/${taskId}`) return jsonResponse(taskResponse);
+  if (key === `GET /v1/tasks/${taskId}/steps`) return jsonResponse(agentStepList);
   if (key === `POST /v1/tasks/${taskId}/cancel`) {
     return jsonResponse({ data: cancelledTask }, 202);
   }
@@ -336,6 +364,7 @@ describe("createArgusClient", () => {
       { idempotencyKey },
     );
     await client.tasks.get(taskId);
+    await client.tasks.listSteps(taskId);
     await client.tasks.cancel(taskId);
     await client.tasks.resolveApproval(taskId, {
       approve: false,
@@ -360,6 +389,7 @@ describe("createArgusClient", () => {
       ["DELETE", `/v1/sessions/${sessionId}`],
       ["POST", `/v1/sessions/${sessionId}/tasks`],
       ["GET", `/v1/tasks/${taskId}`],
+      ["GET", `/v1/tasks/${taskId}/steps`],
       ["POST", `/v1/tasks/${taskId}/cancel`],
       ["POST", `/v1/tasks/${taskId}/approval`],
       ["POST", `/v1/sessions/${sessionId}/actions`],
@@ -492,6 +522,93 @@ describe("createArgusClient", () => {
     expect(new URL(String(profileCall.input)).pathname).toBe("/v1/profiles");
     expect(new URL(String(profileCall.input)).search).toBe("?page=2&page_size=5");
     expect(new URL(String(sessionCall.input)).search).toBe("");
+  });
+
+  it("validates a task step list and forwards pagination", async () => {
+    const stub = createFetchStub(({ input, init }) => {
+      expect(init?.method).toBe("GET");
+      const url = new URL(String(input));
+      expect(url.pathname).toBe(`/v1/tasks/${taskId}/steps`);
+      expect(url.search).toBe("?page=2&page_size=5");
+      return jsonResponse(agentStepList);
+    });
+    const client = createClient(stub.fetch);
+
+    const result = await client.tasks.listSteps(taskId, { page: 2, page_size: 5 });
+    const headers = new Headers(stub.calls[0]?.init?.headers);
+
+    expect(result).toEqual(agentStepList);
+    expect(headers.get("Authorization")).toBe(`Bearer ${token}`);
+    expect(headers.get("Accept")).toBe("application/json");
+  });
+
+  it("raises a 404 problem when listing steps for an unknown task", async () => {
+    const problem: Problem = {
+      type: "about:blank",
+      title: "Not Found",
+      status: 404,
+      detail: "Task tidak ditemukan.",
+    };
+    const stub = createFetchStub(() => jsonResponse(problem, 404));
+    const client = createClient(stub.fetch);
+
+    const error = requireArgusError(
+      await captureError(() => client.tasks.listSteps(taskId)),
+    );
+
+    expect(error.status).toBe(404);
+    expect(error.problem).toEqual(problem);
+    expect(error.message).toBe(problem.detail);
+  });
+
+  it("rejects an invalid task step list response", async () => {
+    const stub = createFetchStub(() =>
+      jsonResponse({
+        data: [{ id: "st_0000000000000001" }],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      }),
+    );
+    const client = createClient(stub.fetch);
+
+    const error = requireArgusError(
+      await captureError(() => client.tasks.listSteps(taskId)),
+    );
+
+    expect(error.status).toBe(200);
+    expect(error.problem).toBeNull();
+    expect(error.message).toBe("Respons Argus tidak valid.");
+  });
+
+  it("exposes only the documented task methods", () => {
+    const stub = createFetchStub(() => jsonResponse(taskResponse));
+    const client = createClient(stub.fetch);
+
+    expect(Object.keys(client.tasks).sort()).toEqual([
+      "cancel",
+      "create",
+      "get",
+      "listSteps",
+      "resolveApproval",
+    ]);
+  });
+
+  it("exposes 21 documented methods", () => {
+    const stub = createFetchStub(() => jsonResponse(taskResponse));
+    const client = createClient(stub.fetch);
+    const methods = [
+      client.health,
+      ...Object.values(client.browser),
+      ...Object.values(client.profiles),
+      ...Object.values(client.sessions),
+      ...Object.values(client.tasks),
+      ...Object.values(client.actions),
+      ...Object.values(client.providers),
+      ...Object.values(client.events),
+    ];
+
+    expect(methods.filter((value) => typeof value === "function")).toHaveLength(21);
   });
 
   it("does not read a body for 204 responses", async () => {

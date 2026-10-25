@@ -15,6 +15,12 @@ import {
   sessionResponseSchema,
   taskResponseSchema,
 } from "./api";
+import {
+  agentStepListResponseSchema,
+  agentStepResultSchema,
+  agentStepSchema,
+  agentStepVerificationSchema,
+} from "./agent-step";
 import { actionRequestSchema, actionResponseSchema, actionResultSchema } from "./action";
 import { chromeInstallerStateSchema } from "./chrome-installer";
 import { healthResponseSchema, problemSchema } from "./contracts";
@@ -95,6 +101,10 @@ const COMPONENTS: readonly ComponentDefinition[] = [
   { name: "CreateSessionRequest", schema: createSessionRequestSchema, io: "input" },
   { name: "Task", schema: taskSchema, io: "output" },
   { name: "TaskResponse", schema: taskResponseSchema, io: "output" },
+  { name: "AgentStep", schema: agentStepSchema, io: "output" },
+  { name: "AgentStepResult", schema: agentStepResultSchema, io: "output" },
+  { name: "AgentStepVerification", schema: agentStepVerificationSchema, io: "output" },
+  { name: "AgentStepListResponse", schema: agentStepListResponseSchema, io: "output" },
   { name: "CreateTaskRequest", schema: createTaskRequestSchema, io: "input" },
   { name: "Approval", schema: approvalSchema, io: "output" },
   { name: "ApprovalResponse", schema: approvalResponseSchema, io: "output" },
@@ -244,7 +254,7 @@ const LAST_EVENT_ID_PARAMETER: OpenApiParameter = {
 };
 
 const EVENT_STREAM_DESCRIPTION =
-  "Stream Server-Sent Events dengan heartbeat 15 detik berupa komentar ping. Nama event: approval.requested, task.completed, task.failed, task.cancelled, dan step. Replay Last-Event-ID bersifat best-effort dan hilang saat sidecar restart.";
+  "Stream Server-Sent Events dengan heartbeat 15 detik berupa komentar ping. Nama event: agent.step, approval.requested, task.completed, task.failed, task.cancelled, dan step. Replay Last-Event-ID bersifat best-effort dan hilang saat sidecar restart.";
 
 const FREE_OBJECT_SCHEMA = inlineSchema(z.record(z.string(), z.unknown()), "output");
 
@@ -465,6 +475,20 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
       parameters: [TASK_ID_PARAMETER],
       responses: {
         "200": jsonResponse("Status task.", "TaskResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
+      },
+    },
+  },
+  "/tasks/{id}/steps": {
+    get: {
+      operationId: "listTaskSteps",
+      summary: "Daftar langkah task dengan paginasi",
+      tags: ["Tasks"],
+      parameters: [TASK_ID_PARAMETER, ...PAGINATION_PARAMETERS],
+      responses: {
+        "200": jsonResponse("Daftar langkah task.", "AgentStepListResponse"),
         "400": BAD_REQUEST,
         "401": UNAUTHORIZED,
         "404": NOT_FOUND,

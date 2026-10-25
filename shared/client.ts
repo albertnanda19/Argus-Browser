@@ -5,6 +5,10 @@ import {
   type ActionResponse,
 } from "./action";
 import {
+  agentStepListResponseSchema,
+  type AgentStepListResponse,
+} from "./agent-step";
+import {
   approvalResponseSchema,
   browserStateResponseSchema,
   profileListResponseSchema,
@@ -114,6 +118,10 @@ export type ArgusClient = {
       options: CreateTaskOptions,
     ): Promise<TaskResponse>;
     get(id: string): Promise<TaskResponse>;
+    listSteps(
+      id: string,
+      query?: Partial<PaginationQuery>,
+    ): Promise<AgentStepListResponse>;
     cancel(id: string): Promise<TaskResponse>;
     resolveApproval(
       id: string,
@@ -495,6 +503,13 @@ export function createArgusClient(options: ArgusClientOptions): ArgusClient {
         request(config, taskResponseSchema, `/tasks/${encodeURIComponent(id)}`, {
           method: "GET",
         }),
+      listSteps: (id, query) =>
+        request(
+          config,
+          agentStepListResponseSchema,
+          `/tasks/${encodeURIComponent(id)}/steps${paginationQuery(query)}`,
+          { method: "GET" },
+        ),
       cancel: (id) =>
         request(
           config,

@@ -1,29 +1,17 @@
 import { randomBytes } from "node:crypto";
+import type {
+  AgentStep,
+  AgentStepResult,
+  AgentStepStatus,
+  AgentStepVerification,
+} from "../shared/agent-step";
 
-export type AgentStepStatus = "done" | "failed" | "blocked";
-
-export type AgentStepVerification = {
-  readonly stepOk: boolean;
-  readonly goalComplete: boolean;
-  readonly reason: string;
-};
-
-export type AgentStepResult = {
-  readonly status: AgentStepStatus;
-  readonly url: string;
-  readonly pageChanged: boolean;
-  readonly verification: AgentStepVerification | null;
-};
-
-export type AgentStep = {
-  readonly id: string;
-  readonly taskId: string;
-  readonly index: number;
-  readonly action: string;
-  readonly target: string;
-  readonly result: AgentStepResult;
-  readonly durationMs: number;
-};
+export type {
+  AgentStep,
+  AgentStepResult,
+  AgentStepStatus,
+  AgentStepVerification,
+} from "../shared/agent-step";
 
 export type AddAgentStepInput = {
   readonly taskId: string;

@@ -67,6 +67,7 @@ function createHarness() {
     profiles,
     sessions,
     tasks: createTaskManager({ sessions, events, now: () => new Date(now) }),
+    steps: { listByTask: () => [] },
     runner: {
       start: () => undefined,
       cancel: () => undefined,
@@ -126,7 +127,7 @@ describe("GET /v1/openapi.json", () => {
     );
 
     expect(body.openapi).toBe("3.1.0");
-    expect(operationCount).toBe(21);
+    expect(operationCount).toBe(22);
   });
 
   it("builds the document once when the app is created", async () => {

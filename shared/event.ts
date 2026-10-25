@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentStepSchema, agentStepStatusSchema } from "./agent-step";
 import { jsonObjectSchema, taskIdSchema } from "./task";
 
 export const stepActionSchema = z.enum(["navigate", "click", "type", "extract"]);
@@ -15,6 +16,19 @@ export const stepEventSchema = z.strictObject({
 });
 
 export type StepEvent = z.infer<typeof stepEventSchema>;
+
+export const agentStepEventSchema = z.strictObject({
+  type: z.literal("agent.step"),
+  taskId: taskIdSchema,
+  index: agentStepSchema.shape.index,
+  action: agentStepSchema.shape.action,
+  target: agentStepSchema.shape.target,
+  status: agentStepStatusSchema,
+  url: z.string(),
+  at: z.iso.datetime({ offset: false }),
+});
+
+export type AgentStepEvent = z.infer<typeof agentStepEventSchema>;
 
 export const approvalRequestedEventSchema = z.strictObject({
   type: z.literal("approval.requested"),
@@ -56,6 +70,7 @@ export type TaskCancelledEvent = z.infer<typeof taskCancelledEventSchema>;
 
 export const domainEventSchema = z.discriminatedUnion("type", [
   stepEventSchema,
+  agentStepEventSchema,
   approvalRequestedEventSchema,
   taskCompletedEventSchema,
   taskFailedEventSchema,

@@ -4,6 +4,12 @@ import {
   actionRequestSchema,
   actionResultSchema,
 } from "./action";
+import {
+  agentStepListResponseSchema,
+  agentStepResultSchema,
+  agentStepSchema,
+  agentStepVerificationSchema,
+} from "./agent-step";
 import { chromeInstallerStateSchema } from "./chrome-installer";
 import { problemSchema } from "./contracts";
 import { createOpenApiDocument, type OpenApiOperation } from "./openapi";
@@ -35,6 +41,7 @@ const EXPECTED_OPERATIONS = [
   "POST /sessions/{id}/tasks",
   "POST /sessions/{id}/actions",
   "GET /tasks/{id}",
+  "GET /tasks/{id}/steps",
   "POST /tasks/{id}/cancel",
   "POST /tasks/{id}/approval",
   "GET /events",
@@ -120,6 +127,32 @@ function generatedJsonSchema(schema: z.ZodType, io: "input" | "output"): JsonObj
   return json;
 }
 
+function generatedAgentStepComponents(): Record<string, JsonObject> {
+  const registry = z.registry<{ id?: string }>();
+  const components = [
+    { name: "AgentStep", schema: agentStepSchema },
+    { name: "AgentStepResult", schema: agentStepResultSchema },
+    { name: "AgentStepVerification", schema: agentStepVerificationSchema },
+    { name: "AgentStepListResponse", schema: agentStepListResponseSchema },
+  ] as const;
+
+  for (const component of components) {
+    registry.add(component.schema, { id: component.name });
+  }
+
+  const uri = (id: string): string => `#/components/schemas/${id}`;
+  const generated = z.toJSONSchema(registry, { io: "output", uri }).schemas;
+
+  return Object.fromEntries(
+    Object.entries(generated).map(([name, schema]) => {
+      const json = { ...schema };
+      delete json.$schema;
+      delete json.$id;
+      return [name, json];
+    }),
+  );
+}
+
 describe("OpenAPI document", () => {
   it("declares OpenAPI 3.1, API metadata, server, security, and tags", () => {
     const document = createOpenApiDocument();
@@ -152,8 +185,8 @@ describe("OpenAPI document", () => {
     const document = createOpenApiDocument();
     const operations = allOperations().map(({ method, path }) => `${method.toUpperCase()} ${path}`);
 
-    expect(Object.keys(document.paths)).toHaveLength(16);
-    expect(operations).toHaveLength(21);
+    expect(Object.keys(document.paths)).toHaveLength(17);
+    expect(operations).toHaveLength(22);
     expect(new Set(operations)).toEqual(new Set(EXPECTED_OPERATIONS));
   });
 
@@ -227,8 +260,18 @@ describe("OpenAPI document", () => {
     expect(schemas.UpdateProviderRequest).toEqual(
       generatedJsonSchema(providerConfigRequestSchema, "input"),
     );
-  });
+    const agentComponents = generatedAgentStepComponents();
 
+    expect(schemas.AgentStep).toEqual(agentComponents.AgentStep);
+    expect(schemas.AgentStepResult).toEqual(agentComponents.AgentStepResult);
+    expect(schemas.AgentStepVerification).toEqual(
+      agentComponents.AgentStepVerification,
+    );
+    expect(schemas.AgentStepListResponse).toEqual(
+      agentComponents.AgentStepListResponse,
+    );
+    expect(Object.keys(schemas)).toHaveLength(29);
+  });
   it("documents provider configuration without returning the API key", () => {
     const document = createOpenApiDocument();
     const schemas = document.components.schemas;
@@ -292,6 +335,43 @@ describe("OpenAPI document", () => {
     }
   });
 
+  it("documents the paginated task step query", () => {
+    const operation = operationAt("get", "/tasks/{id}/steps");
+    const id = operation.parameters?.find((parameter) => parameter.name === "id");
+    const page = operation.parameters?.find((parameter) => parameter.name === "page");
+    const pageSize = operation.parameters?.find(
+      (parameter) => parameter.name === "page_size",
+    );
+
+    expect(operation.tags).toEqual(["Tasks"]);
+    expect(id?.schema.pattern).toBe("^t_[0-9a-f]{16}$");
+    expect(page?.schema).toEqual({
+      default: 1,
+      type: "integer",
+      minimum: 1,
+      maximum: 9007199254740991,
+    });
+    expect(pageSize?.schema).toEqual({
+      default: 20,
+      type: "integer",
+      minimum: 1,
+      maximum: 100,
+    });
+    expect(operation.responses["200"]).toEqual({
+      description: "Daftar langkah task.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/AgentStepListResponse" },
+        },
+      },
+    });
+    expect(operation.responses["400"]).toBeDefined();
+    expect(operation.responses["404"]).toBeDefined();
+    expect(Object.keys(createOpenApiDocument().paths["/tasks/{id}/steps"] ?? {})).toEqual([
+      "get",
+    ]);
+  });
+
   it("documents path id patterns", () => {
     const cases = [
       { method: "delete", path: "/profiles/{id}", pattern: "^p_[0-9a-f]{16}$" },
@@ -325,9 +405,9 @@ describe("OpenAPI document", () => {
     const lastEventId = operation.parameters?.find((parameter) => parameter.name === "Last-Event-ID");
 
     expect(response?.content?.["text/event-stream"]?.schema).toEqual({ type: "string" });
+    expect(response?.description).toContain("agent.step");
     expect(response?.description).toContain("approval.requested");
-    expect(response?.description).toContain("task.completed");
-    expect(response?.description).toContain("task.failed");
+    expect(response?.description).toContain("task.completed");    expect(response?.description).toContain("task.failed");
     expect(response?.description).toContain("task.cancelled");
     expect(response?.description).toContain("step");
     expect(response?.description).toContain("heartbeat 15 detik");

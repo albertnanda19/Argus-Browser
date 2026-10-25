@@ -176,6 +176,7 @@ function createHarness(options: HarnessOptions = {}) {
     profiles: profilesService,
     sessions: sessionsService,
     tasks,
+    steps: { listByTask: () => [] },
     runner: {
       start: () => undefined,
       cancel: () => undefined,

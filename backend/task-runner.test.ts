@@ -225,6 +225,7 @@ function createRunnerHarness(options: RunnerHarnessOptions = {}) {
     providers,
     registry,
     steps,
+    events,
     createAgent: options.createAgent ?? (async () => createFakeAgent().agent),
     maxSteps: options.maxSteps,
     maxDurationMs: options.maxDurationMs,
@@ -266,6 +267,7 @@ function createAppHarness(
     },
     sessions,
     tasks,
+    steps: { listByTask: () => [] },
     runner,
     actions: {
       execute: async () => {
@@ -325,6 +327,23 @@ async function withDeadline<T>(promise: Promise<T>, timeoutMs = 1_000): Promise<
   });
 }
 
+function taskEvents(events: EventBus, taskId: string): DomainEvent[] {
+  return events
+    .list()
+    .map(({ event }) => event)
+    .filter((event) => event.taskId === taskId);
+}
+
+const AGENT_STEP_KEYS = [
+  "action",
+  "at",
+  "index",
+  "status",
+  "target",
+  "taskId",
+  "type",
+  "url",
+];
 
 
 describe("isIrreversibleAction", () => {
@@ -900,5 +919,136 @@ describe("task runner", () => {
 
     await harness.runner.shutdown();
     expect(fake.state.closeCount).toBe(1);
+  });
+});
+
+describe("agent.step events", () => {
+  it("publishes one agent.step before task.completed without verification fields", async () => {
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(terminal);
+
+    const published = taskEvents(harness.events, task.id);
+    expect(published.map((event) => event.type)).toEqual([
+      "agent.step",
+      "task.completed",
+    ]);
+
+    const stepEvent = published[0];
+    if (stepEvent?.type !== "agent.step") {
+      throw new Error("Expected an agent.step event.");
+    }
+
+    expect(stepEvent).toEqual({
+      type: "agent.step",
+      taskId: task.id,
+      index: 1,
+      action: "act",
+      target: "Buka kontak",
+      status: "done",
+      url: pageUrl,
+      at: expect.any(String),
+    });
+    expect(Object.keys(stepEvent).sort()).toEqual(AGENT_STEP_KEYS);
+    expect(stepEvent.at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+
+  it("publishes a failed agent.step before task.failed without the reason", async () => {
+    const fake = createFakeAgent({
+      extractText: async () =>
+        JSON.stringify({
+          stepOk: false,
+          goalComplete: false,
+          reason: "Tombol belum berubah.",
+        }),
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(terminal);
+
+    const published = taskEvents(harness.events, task.id);
+    expect(published.map((event) => event.type)).toEqual([
+      "agent.step",
+      "task.failed",
+    ]);
+
+    const stepEvent = published[0];
+    if (stepEvent?.type !== "agent.step") {
+      throw new Error("Expected an agent.step event.");
+    }
+
+    expect(stepEvent.status).toBe("failed");
+    expect(Object.keys(stepEvent).sort()).toEqual(AGENT_STEP_KEYS);
+    expect(JSON.stringify(stepEvent)).not.toContain("Tombol belum berubah.");
+  });
+
+  it("publishes a blocked agent.step before task.failed", async () => {
+    const fake = createFakeAgent({
+      observe: async () => [{ selector: "#kirim", description: "Kirim pesan" }],
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks, "Kirim pesan ke kontak");
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(terminal);
+
+    const published = taskEvents(harness.events, task.id);
+    expect(published.map((event) => event.type)).toEqual([
+      "agent.step",
+      "task.failed",
+    ]);
+
+    const stepEvent = published[0];
+    if (stepEvent?.type !== "agent.step") {
+      throw new Error("Expected an agent.step event.");
+    }
+
+    expect(stepEvent).toMatchObject({
+      index: 1,
+      action: "act",
+      target: "Kirim pesan",
+      status: "blocked",
+    });
+    expect(Object.keys(stepEvent).sort()).toEqual(AGENT_STEP_KEYS);
+  });
+
+  it("publishes exactly one agent.step per recorded step", async () => {
+    const fake = createFakeAgent({
+      extractText: async () =>
+        JSON.stringify({
+          stepOk: true,
+          goalComplete: false,
+          reason: "Lanjut ke langkah berikutnya.",
+        }),
+    });
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+      maxSteps: 2,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(terminal);
+
+    const published = taskEvents(harness.events, task.id);
+    expect(published.map((event) => event.type)).toEqual([
+      "agent.step",
+      "agent.step",
+      "task.failed",
+    ]);
+    expect(
+      published.flatMap((event) =>
+        event.type === "agent.step" ? [event.index] : [],
+      ),
+    ).toEqual([1, 2]);
   });
 });

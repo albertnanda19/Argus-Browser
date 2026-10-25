@@ -60,6 +60,7 @@ function createHarness(heartbeatMs = 60_000): Harness {
       },
     },
     tasks: createTaskManager({ sessions: { get: () => null }, events }),
+    steps: { listByTask: () => [] },
     runner: {
       start: () => undefined,
       cancel: () => undefined,
@@ -240,6 +241,41 @@ describe("GET /v1/events", () => {
       id: "1",
       event: "task.completed",
       data: JSON.stringify({ taskId: taskA, result: {}, at: fixedNow }),
+    });
+
+    await client.close();
+  });
+
+  it("delivers an agent.step event to a task-filtered stream", async () => {
+    const harness = createHarness();
+    const { client } = await openStream(harness, `?taskId=${taskA}`);
+
+    const event: DomainEvent = {
+      type: "agent.step",
+      taskId: taskA,
+      index: 2,
+      action: "click",
+      target: "Buka kontak",
+      status: "failed",
+      url: "https://example.test/kontak",
+      at: fixedNow,
+    };
+    harness.events.publish(event);
+
+    const frame = parseFrame(await client.nextFrame());
+    expect(frame).toEqual({
+      comment: null,
+      id: "1",
+      event: "agent.step",
+      data: JSON.stringify({
+        taskId: taskA,
+        index: 2,
+        action: "click",
+        target: "Buka kontak",
+        status: "failed",
+        url: "https://example.test/kontak",
+        at: fixedNow,
+      }),
     });
 
     await client.close();
