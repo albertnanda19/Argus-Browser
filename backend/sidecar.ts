@@ -1,16 +1,41 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { serve } from "@hono/node-server";
-import { createApp } from "./app";
+import { createApp, type ProfileService, type SessionService } from "./app";
 import { resolveAppDataDir, writeApiCredentials } from "./app-data";
+import { createChromeInstaller } from "./chrome-installer";
+import { ChromeFailure } from "./chrome-errors";
+import { createProfile, deleteProfile, listProfiles } from "./profile-store";
+import { createSessionManager } from "./session-manager";
+
+const SHUTDOWN_TIMEOUT_MS = 9_000;
 
 async function main(): Promise<void> {
   const appDataDir = resolveAppDataDir();
   const token = randomBytes(32).toString("base64url");
   const allowedOrigin = process.env.ARGUS_UI_ORIGIN ?? "null";
 
+  const chromeInstaller = createChromeInstaller({
+    appDataDir,
+    onStateChange: (state) => {
+      if (state.status === "error") {
+        console.error(`Chrome installer error: ${state.error.code}`);
+      }
+    },
+  });
+  await chromeInstaller.initialize();
+
+  const sessionManager = createSessionManager({ appDataDir, chromeInstaller });
+
+  const profiles: ProfileService = {
+    list: () => listProfiles(appDataDir),
+    create: (name) => createProfile(appDataDir, name),
+    delete: (profileId) => deleteProfile(appDataDir, profileId),
+  };
+  const sessions: SessionService = sessionManager;
+
   const server = serve({
-    fetch: createApp({ token, allowedOrigin }).fetch,
+    fetch: createApp({ token, allowedOrigin, chromeInstaller, profiles, sessions }).fetch,
     hostname: "127.0.0.1",
     port: 0,
   });
@@ -30,8 +55,34 @@ async function main(): Promise<void> {
       return;
     }
     isShuttingDown = true;
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 2000).unref();
+
+    const forceExit = setTimeout(() => process.exit(0), SHUTDOWN_TIMEOUT_MS);
+    forceExit.unref();
+    server.close();
+
+    const stop = async (): Promise<void> => {
+      await sessionManager.shutdown().catch((error: unknown) => {
+        console.warn(
+          `Session shutdown failed: ${error instanceof Error ? error.name : "unknown"}`,
+        );
+      });
+      await chromeInstaller.shutdown().catch((error: unknown) => {
+        console.warn(
+          `Chrome shutdown failed: ${error instanceof Error ? error.name : "unknown"}`,
+        );
+      });
+    };
+
+    void stop().then(
+      () => {
+        clearTimeout(forceExit);
+        process.exit(0);
+      },
+      () => {
+        clearTimeout(forceExit);
+        process.exit(0);
+      },
+    );
   };
 
   process.on("SIGTERM", shutdown);
@@ -39,6 +90,14 @@ async function main(): Promise<void> {
   process.on("disconnect", shutdown);
 
   process.send?.({ type: "ready" });
+
+  if (chromeInstaller.getState().status === "absent") {
+    void chromeInstaller.start().catch((error: unknown) => {
+      console.error(
+        `Chrome auto-download failed: ${error instanceof ChromeFailure ? error.code : "unknown"}`,
+      );
+    });
+  }
 }
 
 void main().catch((error: unknown) => {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { chromeInstallerStatusSchema } from "./chrome-installer";
 
 export const apiCredentialsSchema = z.strictObject({
   port: z.int().min(1).max(65535),
@@ -24,7 +25,11 @@ export type SidecarState = z.infer<typeof sidecarStateSchema>;
 
 export const healthResponseSchema = z.strictObject({
   data: z.strictObject({
-    ok: z.literal(true),
+    ok: z.boolean(),
+    chrome: z.strictObject({
+      status: chromeInstallerStatusSchema,
+      version: z.string().min(1).nullable(),
+    }),
   }),
 });
 

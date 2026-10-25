@@ -12,7 +12,7 @@ import {
 import { RestartPolicy } from "../shared/restart-policy";
 
 const READY_TIMEOUT_MS = 2000;
-const STOP_TIMEOUT_MS = 3000;
+const STOP_TIMEOUT_MS = 10_000;
 
 type StartMode = "supervised" | "manual";
 

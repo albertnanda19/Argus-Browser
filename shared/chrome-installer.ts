@@ -27,6 +27,17 @@ export const chromeDownloadProgressSchema = z.strictObject({
 
 export type ChromeDownloadProgress = z.infer<typeof chromeDownloadProgressSchema>;
 
+export const chromeInstallerStatusSchema = z.enum([
+  "absent",
+  "downloading",
+  "verifying",
+  "extracting",
+  "ready",
+  "error",
+]);
+
+export type ChromeInstallerStatus = z.infer<typeof chromeInstallerStatusSchema>;
+
 export const chromeInstallerStateSchema = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("absent"),
