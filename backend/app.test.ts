@@ -177,6 +177,11 @@ function createHarness(
     profiles: overrides.profiles ?? profiles.service,
     sessions: overrides.sessions ?? sessions.service,
     tasks,
+    actions: {
+      execute: async () => {
+        throw new Error("Unused action execution.");
+      },
+    },
     events,
     eventConnections: createEventStreamRegistry(),
   });

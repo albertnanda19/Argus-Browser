@@ -7,7 +7,7 @@ export type StepAction = z.infer<typeof stepActionSchema>;
 
 export const stepEventSchema = z.strictObject({
   type: z.literal("step"),
-  taskId: taskIdSchema,
+  taskId: taskIdSchema.nullable(),
   action: stepActionSchema,
   url: z.string().min(1).optional(),
   selector: z.string().min(1).optional(),

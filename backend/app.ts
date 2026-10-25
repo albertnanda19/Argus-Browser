@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import type { ZodType } from "zod";
+import { actionRequestSchema, actionResponseSchema } from "../shared/action";
 import {
   approvalDecisionRequestSchema,
   approvalResponseSchema,
@@ -26,6 +27,7 @@ import type { ChromeLocalValidation } from "./chrome-local-binary";
 import { ChromeFailure } from "./chrome-errors";
 import { isAuthorized } from "./auth";
 import { handleKnownError, INTERNAL_ERROR_DETAIL, problemResponse } from "./api-problem";
+import type { ActionService } from "./action-manager";
 import type { EventBus } from "./event-bus";
 import { createEventStream, type EventStreamRegistry } from "./event-stream";
 import { createProfileLock } from "./profile-lock";
@@ -66,6 +68,7 @@ export type AppOptions = {
   readonly profiles: ProfileService;
   readonly sessions: SessionService;
   readonly tasks: TaskService;
+  readonly actions: ActionService;
   readonly events: EventBus;
   readonly eventConnections: EventStreamRegistry;
   readonly eventHeartbeatMs?: number;
@@ -342,6 +345,25 @@ export function createApp(options: AppOptions): Hono {
     try {
       await options.sessions.close(parsedId.data);
       return c.body(null, 204);
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
+  });
+
+  app.post("/v1/sessions/:id/actions", async (c) => {
+    const parsedId = sessionIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id sesi tidak valid.");
+    }
+
+    const body = await parseJsonBody(c, actionRequestSchema);
+    if (!body.ok) {
+      return problemResponse(c, 400, "Body permintaan tidak valid.");
+    }
+
+    try {
+      const result = await options.actions.execute(parsedId.data, body.data);
+      return c.json(actionResponseSchema.parse({ data: result }), 200);
     } catch (error) {
       return handleKnownError(c, error);
     }

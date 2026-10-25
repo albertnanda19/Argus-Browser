@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { problemSchema, type Problem } from "../shared/contracts";
+import { ActionError } from "./action-errors";
 import { ProfileStoreError } from "./profile-store";
 import { SessionError } from "./session-errors";
 import { TaskError } from "./task-errors";
@@ -72,6 +73,21 @@ export function knownProblem(
       case "task_not_waiting_approval":
       case "task_invalid_transition":
         return { status: 409, detail: error.message };
+    }
+  }
+
+  if (error instanceof ActionError) {
+    switch (error.code) {
+      case "action_session_not_found":
+      case "action_task_not_found":
+        return { status: 404, detail: error.message };
+      case "action_session_not_ready":
+      case "action_task_not_running":
+        return { status: 409, detail: error.message };
+      case "action_navigation_failed":
+      case "action_target_not_found":
+      case "action_failed":
+        return { status: 422, detail: error.message };
     }
   }
 

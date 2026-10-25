@@ -78,6 +78,11 @@ function createHarness() {
     profiles: profilesService,
     sessions: sessionsService,
     tasks,
+    actions: {
+      execute: async () => {
+        throw new Error("Unused action execution.");
+      },
+    },
     events,
     eventConnections: createEventStreamRegistry(),
   });

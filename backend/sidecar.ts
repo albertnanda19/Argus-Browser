@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { serve } from "@hono/node-server";
+import { createActionManager } from "./action-manager";
 import { createApp, type ProfileService, type SessionService } from "./app";
 import { resolveAppDataDir, writeApiCredentials } from "./app-data";
 import { createChromeInstaller } from "./chrome-installer";
@@ -32,6 +33,7 @@ async function main(): Promise<void> {
   const events = createEventBus();
   const eventConnections = createEventStreamRegistry();
   const tasks = createTaskManager({ sessions: sessionManager, events });
+  const actions = createActionManager({ sessions: sessionManager, tasks, events });
 
   const profiles: ProfileService = {
     list: () => listProfiles(appDataDir),
@@ -48,6 +50,7 @@ async function main(): Promise<void> {
       profiles,
       sessions,
       tasks,
+      actions,
       events,
       eventConnections,
     }).fetch,

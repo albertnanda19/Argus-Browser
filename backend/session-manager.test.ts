@@ -43,6 +43,12 @@ function createFakeContext(closeImpl?: () => Promise<void>): FakeContext {
     on(_event, listener) {
       listeners.push(listener);
     },
+    pages() {
+      return [];
+    },
+    async newPage() {
+      throw new Error("Unused page creation.");
+    },
     emitClose() {
       for (const listener of listeners) {
         listener();

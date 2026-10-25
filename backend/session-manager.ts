@@ -26,6 +26,7 @@ export type SessionManager = {
   start(profileId: string): Promise<Session>;
   listActive(): Session[];
   get(sessionId: string): Session | null;
+  getContext(sessionId: string): BrowserSessionContext | null;
   close(sessionId: string): Promise<Session>;
   shutdown(): Promise<void>;
 };
@@ -115,6 +116,14 @@ class SessionManagerImpl implements SessionManager {
   get(sessionId: string): Session | null {
     const record = this.sessions.get(sessionId);
     return record === undefined ? null : { ...record.session };
+  }
+
+  getContext(sessionId: string): BrowserSessionContext | null {
+    const record = this.sessions.get(sessionId);
+    if (record === undefined || record.session.status !== "ready" || record.context === null) {
+      return null;
+    }
+    return record.context;
   }
 
   async close(sessionId: string): Promise<Session> {

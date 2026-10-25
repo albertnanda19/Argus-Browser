@@ -1,8 +1,22 @@
 import type { BrowserContext } from "playwright-core";
 
+export type BrowserLocator = {
+  click(options: { readonly timeout: number }): Promise<void>;
+  fill(text: string, options: { readonly timeout: number }): Promise<void>;
+  innerText(options: { readonly timeout: number }): Promise<string>;
+};
+
+export type BrowserPage = {
+  goto(url: string, options: { readonly timeout: number }): Promise<unknown>;
+  url(): string;
+  locator(selector: string): BrowserLocator;
+};
+
 export type BrowserSessionContext = {
   close(): Promise<void>;
   on(event: "close", listener: () => void): unknown;
+  pages(): BrowserPage[];
+  newPage(): Promise<BrowserPage>;
 };
 
 export type LaunchBrowserOptions = {

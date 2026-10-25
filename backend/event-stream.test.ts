@@ -60,6 +60,11 @@ function createHarness(heartbeatMs = 60_000): Harness {
       },
     },
     tasks: createTaskManager({ sessions: { get: () => null }, events }),
+    actions: {
+      execute: async () => {
+        throw new Error("Unused action execution.");
+      },
+    },
     events,
     eventConnections: connections,
     eventHeartbeatMs: heartbeatMs,
@@ -85,6 +90,16 @@ function cancelled(taskId = taskA): DomainEvent {
 
 function failed(taskId = taskA): DomainEvent {
   return { type: "task.failed", taskId, reason: "Gagal.", at: fixedNow };
+}
+
+function stepWithoutTask(): DomainEvent {
+  return {
+    type: "step",
+    taskId: null,
+    action: "click",
+    selector: "#submit",
+    at: fixedNow,
+  };
 }
 
 type SseFrame = {
@@ -233,6 +248,21 @@ describe("GET /v1/events", () => {
     expect(heartbeat.comment).toBe("ping");
     expect(heartbeat.id).toBeNull();
     expect(heartbeat.event).toBeNull();
+
+    await client.close();
+  });
+
+  it("does not deliver a step without a task to a task-filtered stream", async () => {
+    const harness = createHarness(100);
+    const { client } = await openStream(harness, `?taskId=${taskA}`);
+
+    harness.events.publish(stepWithoutTask());
+    harness.events.publish(completed());
+
+    const event = parseFrame(await client.nextFrame());
+    expect(event.id).toBe("2");
+    expect(event.event).toBe("task.completed");
+    expect(event.data).toBe(JSON.stringify({ taskId: taskA, result: {}, at: fixedNow }));
 
     await client.close();
   });
