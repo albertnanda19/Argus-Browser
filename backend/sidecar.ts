@@ -5,8 +5,10 @@ import { createApp, type ProfileService, type SessionService } from "./app";
 import { resolveAppDataDir, writeApiCredentials } from "./app-data";
 import { createChromeInstaller } from "./chrome-installer";
 import { ChromeFailure } from "./chrome-errors";
+import { createEventBus } from "./event-bus";
 import { createProfile, deleteProfile, listProfiles } from "./profile-store";
 import { createSessionManager } from "./session-manager";
+import { createTaskManager } from "./task-manager";
 
 const SHUTDOWN_TIMEOUT_MS = 9_000;
 
@@ -26,6 +28,7 @@ async function main(): Promise<void> {
   await chromeInstaller.initialize();
 
   const sessionManager = createSessionManager({ appDataDir, chromeInstaller });
+  const tasks = createTaskManager({ sessions: sessionManager, events: createEventBus() });
 
   const profiles: ProfileService = {
     list: () => listProfiles(appDataDir),
@@ -35,7 +38,7 @@ async function main(): Promise<void> {
   const sessions: SessionService = sessionManager;
 
   const server = serve({
-    fetch: createApp({ token, allowedOrigin, chromeInstaller, profiles, sessions }).fetch,
+    fetch: createApp({ token, allowedOrigin, chromeInstaller, profiles, sessions, tasks }).fetch,
     hostname: "127.0.0.1",
     port: 0,
   });

@@ -2,6 +2,7 @@ import type { Context } from "hono";
 import { problemSchema, type Problem } from "../shared/contracts";
 import { ProfileStoreError } from "./profile-store";
 import { SessionError } from "./session-errors";
+import { TaskError } from "./task-errors";
 
 export type ProblemStatus = 400 | 401 | 404 | 409 | 422 | 500;
 
@@ -57,6 +58,20 @@ export function knownProblem(
       case "session_launch_failed":
       case "session_close_failed":
         return { status: 500, detail: error.message };
+    }
+  }
+
+  if (error instanceof TaskError) {
+    switch (error.code) {
+      case "task_session_not_found":
+      case "task_not_found":
+        return { status: 404, detail: error.message };
+      case "task_session_not_ready":
+      case "task_idempotency_conflict":
+      case "task_not_cancellable":
+      case "task_not_waiting_approval":
+      case "task_invalid_transition":
+        return { status: 409, detail: error.message };
     }
   }
 

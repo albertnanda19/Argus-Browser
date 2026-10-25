@@ -1,26 +1,33 @@
 import { Hono, type Context } from "hono";
 import type { ZodType } from "zod";
 import {
+  approvalDecisionRequestSchema,
+  approvalResponseSchema,
   browserStateResponseSchema,
   createProfileRequestSchema,
   createSessionRequestSchema,
+  createTaskRequestSchema,
+  idempotencyKeySchema,
   localExecutableRequestSchema,
   paginationQuerySchema,
   profileListResponseSchema,
   profileResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
+  taskResponseSchema,
   type PaginationQuery,
 } from "../shared/api";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
 import { healthResponseSchema } from "../shared/contracts";
 import { profileIdSchema, type Profile } from "../shared/profile";
 import { sessionIdSchema, type Session } from "../shared/session";
+import { taskIdSchema } from "../shared/task";
 import type { ChromeLocalValidation } from "./chrome-local-binary";
 import { ChromeFailure } from "./chrome-errors";
 import { isAuthorized } from "./auth";
 import { handleKnownError, INTERNAL_ERROR_DETAIL, problemResponse } from "./api-problem";
 import { createProfileLock } from "./profile-lock";
+import type { TaskService } from "./task-manager";
 
 const ACTIVE_INSTALL_STATUSES = new Set<ChromeInstallerState["status"]>([
   "downloading",
@@ -56,9 +63,14 @@ export type AppOptions = {
   readonly chromeInstaller: ChromeInstallerApi;
   readonly profiles: ProfileService;
   readonly sessions: SessionService;
+  readonly tasks: TaskService;
 };
 
 type ParsedBody<T> = { readonly ok: true; readonly data: T } | { readonly ok: false };
+
+type ParsedIdempotencyKey =
+  | { readonly ok: true; readonly key: string }
+  | { readonly ok: false; readonly detail: string };
 
 async function parseJsonBody<T>(c: Context, schema: ZodType<T>): Promise<ParsedBody<T>> {
   let body: unknown;
@@ -88,6 +100,21 @@ function parsePagination(c: Context): PaginationQuery | null {
   return parsed.success ? parsed.data : null;
 }
 
+function parseIdempotencyKey(c: Context): ParsedIdempotencyKey {
+  const raw = c.req.header("Idempotency-Key");
+  const parsed = idempotencyKeySchema.safeParse(raw);
+  if (parsed.success) {
+    return { ok: true, key: parsed.data };
+  }
+  return {
+    ok: false,
+    detail:
+      raw !== undefined && raw.trim().length > 0
+        ? "Idempotency-Key tidak valid."
+        : "Idempotency-Key wajib diisi.",
+  };
+}
+
 function paginate<T>(items: readonly T[], page: number, pageSize: number) {
   const start = (page - 1) * pageSize;
   return {
@@ -108,7 +135,7 @@ export function createApp(options: AppOptions): Hono {
     if (origin !== undefined && origin === options.allowedOrigin) {
       c.header("Access-Control-Allow-Origin", origin);
       c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-      c.header("Access-Control-Allow-Headers", "Authorization, Content-Type");
+      c.header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key");
       c.header("Access-Control-Max-Age", "600");
       c.header("Vary", "Origin");
     }
@@ -302,6 +329,77 @@ export function createApp(options: AppOptions): Hono {
     try {
       await options.sessions.close(parsedId.data);
       return c.body(null, 204);
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
+  });
+
+  app.post("/v1/sessions/:id/tasks", async (c) => {
+    const parsedId = sessionIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id sesi tidak valid.");
+    }
+
+    const body = await parseJsonBody(c, createTaskRequestSchema);
+    if (!body.ok) {
+      return problemResponse(c, 400, "Body permintaan tidak valid.");
+    }
+
+    const idempotencyKey = parseIdempotencyKey(c);
+    if (!idempotencyKey.ok) {
+      return problemResponse(c, 400, idempotencyKey.detail);
+    }
+
+    try {
+      const task = options.tasks.createTask(parsedId.data, body.data, idempotencyKey.key);
+      return c.json(taskResponseSchema.parse({ data: task }), 202);
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
+  });
+
+  app.get("/v1/tasks/:id", (c) => {
+    const parsedId = taskIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id task tidak valid.");
+    }
+
+    const task = options.tasks.getTask(parsedId.data);
+    if (task === null) {
+      return problemResponse(c, 404, "Task tidak ditemukan.");
+    }
+
+    return c.json(taskResponseSchema.parse({ data: task }), 200);
+  });
+
+  app.post("/v1/tasks/:id/cancel", (c) => {
+    const parsedId = taskIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id task tidak valid.");
+    }
+
+    try {
+      const task = options.tasks.cancelTask(parsedId.data);
+      return c.json(taskResponseSchema.parse({ data: task }), 202);
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
+  });
+
+  app.post("/v1/tasks/:id/approval", async (c) => {
+    const parsedId = taskIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id task tidak valid.");
+    }
+
+    const body = await parseJsonBody(c, approvalDecisionRequestSchema);
+    if (!body.ok) {
+      return problemResponse(c, 400, "Body permintaan tidak valid.");
+    }
+
+    try {
+      const result = options.tasks.resolveApproval(parsedId.data, body.data);
+      return c.json(approvalResponseSchema.parse({ data: result }), 202);
     } catch (error) {
       return handleKnownError(c, error);
     }

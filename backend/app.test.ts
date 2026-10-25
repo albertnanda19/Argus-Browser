@@ -5,8 +5,10 @@ import type { ChromeLocalValidation } from "./chrome-local-binary";
 import type { Profile } from "../shared/profile";
 import type { Session, SessionStatus } from "../shared/session";
 import { createApp } from "./app";
+import { createEventBus } from "./event-bus";
 import { ProfileStoreError } from "./profile-store";
 import { SessionError } from "./session-errors";
+import { createTaskManager } from "./task-manager";
 
 const token = "test-token";
 const allowedOrigin = "http://127.0.0.1:5173";
@@ -160,6 +162,11 @@ function createHarness(
   const installer = createFakeInstaller();
   const profiles = createFakeProfiles();
   const sessions = createFakeSessions();
+  const tasks = createTaskManager({
+    sessions: sessions.service,
+    events: createEventBus(),
+    now: () => new Date(now),
+  });
 
   const app = createApp({
     token,
@@ -167,6 +174,7 @@ function createHarness(
     chromeInstaller: overrides.chromeInstaller ?? installer.service,
     profiles: overrides.profiles ?? profiles.service,
     sessions: overrides.sessions ?? sessions.service,
+    tasks,
   });
 
   return { app, installer, profiles, sessions };
