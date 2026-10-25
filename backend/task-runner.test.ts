@@ -148,12 +148,26 @@ function createFakeAgent(hooks: FakeAgentHooks = {}) {
   return { agent, state };
 }
 
-function createFakeSessions() {
+type FakeSessionsOptions = {
+  readonly initialUrl?: string;
+  readonly goto?: (url: string) => Promise<void>;
+};
+
+function createFakeSessions(options: FakeSessionsOptions = {}) {
   let isReady = true;
-  let currentUrl = pageUrl;
+  let isContextAvailable = true;
+  let currentUrl = options.initialUrl ?? pageUrl;
+  let pages: BrowserPage[] = [];
+  const gotoCalls: Array<{ readonly url: string; readonly timeout: number }> = [];
 
   const page: BrowserPage = {
-    goto: async () => undefined,
+    goto: async (url, gotoOptions) => {
+      gotoCalls.push({ url, timeout: gotoOptions.timeout });
+      if (options.goto !== undefined) {
+        await options.goto(url);
+      }
+      currentUrl = url;
+    },
     url: () => currentUrl,
     locator: () => ({
       click: async () => undefined,
@@ -161,11 +175,15 @@ function createFakeSessions() {
       innerText: async () => "",
     }),
   };
+  pages = [page];
   const context: BrowserSessionContext = {
     close: async () => undefined,
     on: () => undefined,
-    pages: () => [page],
-    newPage: async () => page,
+    pages: () => pages,
+    newPage: async () => {
+      pages = [...pages, page];
+      return page;
+    },
   };
   const session: Session = {
     id: readySessionId,
@@ -186,7 +204,9 @@ function createFakeSessions() {
     getCdpUrl: (sessionId: string): string | null =>
       sessionId === readySessionId && isReady ? "http://127.0.0.1:9222" : null,
     getContext: (sessionId: string): BrowserSessionContext | null =>
-      sessionId === readySessionId && isReady ? context : null,
+      sessionId === readySessionId && isReady && isContextAvailable
+        ? context
+        : null,
     start: async () => {
       throw new Error("Unused session start.");
     },
@@ -199,9 +219,16 @@ function createFakeSessions() {
     setReady(value: boolean): void {
       isReady = value;
     },
+    setContextAvailable(value: boolean): void {
+      isContextAvailable = value;
+    },
     setUrl(value: string): void {
       currentUrl = value;
     },
+    clearPages(): void {
+      pages = [];
+    },
+    gotoCalls,
   };
 }
 
@@ -919,6 +946,249 @@ describe("task runner", () => {
 
     await harness.runner.shutdown();
     expect(fake.state.closeCount).toBe(1);
+  });
+});
+
+describe("task runner pre-navigation", () => {
+  const goalUrl = "https://contoh.test/halaman";
+
+  it("navigates to the first goal URL before creating the agent", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    let gotoCallsAtAgentCreation = -1;
+    let observedUrl = "";
+    const fake = createFakeAgent({
+      observe: async () => {
+        observedUrl =
+          sessions.getContext(readySessionId)?.pages().at(-1)?.url() ?? "";
+        return [defaultAction];
+      },
+    });
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => {
+        gotoCallsAtAgentCreation = sessions.gotoCalls.length;
+        return fake.agent;
+      },
+    });
+    const task = createTask(harness.tasks, `Buka ${goalUrl}`);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    if (event.type === "task.completed") {
+      expect(event.result).toEqual({ summary: "Tujuan tercapai.", steps: 2 });
+    }
+    expect(sessions.gotoCalls).toEqual([{ url: goalUrl, timeout: 30_000 }]);
+    expect(gotoCallsAtAgentCreation).toBe(1);
+    expect(observedUrl).toBe(goalUrl);
+
+    const recorded = harness.steps.list(task.id);
+    expect(recorded).toHaveLength(2);
+    expect(recorded[0]).toMatchObject({
+      index: 1,
+      action: "navigate",
+      target: goalUrl,
+      result: {
+        status: "done",
+        url: goalUrl,
+        pageChanged: true,
+        verification: {
+          stepOk: true,
+          goalComplete: false,
+          reason: "Halaman berhasil dibuka.",
+        },
+      },
+    });
+    expect(recorded[0]?.durationMs).toBeGreaterThanOrEqual(0);
+    expect(recorded[1]).toMatchObject({
+      index: 2,
+      action: "act",
+      target: "Buka kontak",
+    });
+
+    const published = taskEvents(harness.events, task.id);
+    expect(published.map((item) => item.type)).toEqual([
+      "agent.step",
+      "agent.step",
+      "task.completed",
+    ]);
+    const navigationEvent = published[0];
+    if (navigationEvent?.type !== "agent.step") {
+      throw new Error("Expected a navigation agent.step event.");
+    }
+    expect(navigationEvent).toMatchObject({
+      index: 1,
+      action: "navigate",
+      target: goalUrl,
+      status: "done",
+      url: goalUrl,
+    });
+    expect(Object.keys(navigationEvent).sort()).toEqual(AGENT_STEP_KEYS);
+  });
+
+  it("does not navigate when the active page is already open", async () => {
+    const sessions = createFakeSessions();
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks, `Buka ${goalUrl}`);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toHaveLength(0);
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      index: 1,
+      action: "act",
+    });
+  });
+
+  it("fails when the active page is empty and the goal has no URL", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    let isAgentCreated = false;
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => {
+        isAgentCreated = true;
+        return fake.agent;
+      },
+    });
+    const task = createTask(harness.tasks, "Buka halaman kontak");
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Halaman awal kosong dan tujuan tidak menyebut URL.",
+      );
+    }
+    expect(isAgentCreated).toBe(false);
+    expect(sessions.gotoCalls).toHaveLength(0);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("records a failed navigation step without creating an agent", async () => {
+    const sessions = createFakeSessions({
+      initialUrl: "about:blank",
+      goto: async () => {
+        throw new Error("Navigation timeout");
+      },
+    });
+    let isAgentCreated = false;
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => {
+        isAgentCreated = true;
+        return fake.agent;
+      },
+    });
+    const task = createTask(harness.tasks, `Buka ${goalUrl}`);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Halaman tidak dapat dibuka dari URL pada tujuan task.",
+      );
+    }
+    expect(isAgentCreated).toBe(false);
+    expect(sessions.gotoCalls).toEqual([{ url: goalUrl, timeout: 30_000 }]);
+
+    const recorded = harness.steps.list(task.id);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      index: 1,
+      action: "navigate",
+      target: goalUrl,
+      result: {
+        status: "failed",
+        pageChanged: false,
+        verification: null,
+      },
+    });
+  });
+
+  it("extracts the first URL without trailing punctuation", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(
+      harness.tasks,
+      "Buka https://satu.test/halaman., lalu https://dua.test/halaman)",
+    );
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toEqual([
+      { url: "https://satu.test/halaman", timeout: 30_000 },
+    ]);
+    expect(harness.steps.list(task.id)[0]).toMatchObject({
+      action: "navigate",
+      target: "https://satu.test/halaman",
+    });
+  });
+
+  it("creates a page when the session context has none", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    sessions.clearPages();
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks, `Buka ${goalUrl}`);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toEqual([{ url: goalUrl, timeout: 30_000 }]);
+    expect(harness.steps.list(task.id)).toHaveLength(2);
+  });
+
+  it("keeps the previous behavior when the session context is unavailable", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    sessions.setContextAvailable(false);
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks, `Buka ${goalUrl}`);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toHaveLength(0);
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      index: 1,
+      action: "act",
+    });
   });
 });
 
