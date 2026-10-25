@@ -9,6 +9,8 @@ import { ChromeFailure } from "./chrome-errors";
 import { createEventBus } from "./event-bus";
 import { createEventStreamRegistry } from "./event-stream";
 import { createProfile, deleteProfile, listProfiles } from "./profile-store";
+import { createProviderRegistry } from "./provider-registry";
+import { createProviderService } from "./provider-service";
 import { createSessionManager } from "./session-manager";
 import { createTaskManager } from "./task-manager";
 
@@ -34,6 +36,10 @@ async function main(): Promise<void> {
   const eventConnections = createEventStreamRegistry();
   const tasks = createTaskManager({ sessions: sessionManager, events });
   const actions = createActionManager({ sessions: sessionManager, tasks, events });
+  const providers = await createProviderService({
+    appDataDir,
+    registry: createProviderRegistry(),
+  });
 
   const profiles: ProfileService = {
     list: () => listProfiles(appDataDir),
@@ -53,6 +59,7 @@ async function main(): Promise<void> {
       actions,
       events,
       eventConnections,
+      providers,
     }).fetch,
     hostname: "127.0.0.1",
     port: 0,

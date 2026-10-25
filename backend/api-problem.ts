@@ -2,6 +2,7 @@ import type { Context } from "hono";
 import { problemSchema, type Problem } from "../shared/contracts";
 import { ActionError } from "./action-errors";
 import { ProfileStoreError } from "./profile-store";
+import { ProviderError } from "./provider-errors";
 import { SessionError } from "./session-errors";
 import { TaskError } from "./task-errors";
 
@@ -89,6 +90,10 @@ export function knownProblem(
       case "action_failed":
         return { status: 422, detail: error.message };
     }
+  }
+
+  if (error instanceof ProviderError) {
+    return { status: 422, detail: error.message };
   }
 
   return null;

@@ -19,6 +19,11 @@ import { actionRequestSchema, actionResponseSchema, actionResultSchema } from ".
 import { chromeInstallerStateSchema } from "./chrome-installer";
 import { healthResponseSchema, problemSchema } from "./contracts";
 import { profileIdSchema, profileSchema } from "./profile";
+import {
+  providerConfigRequestSchema,
+  providerConfigSchema,
+  providerResponseSchema,
+} from "./provider";
 import { sessionIdSchema, sessionSchema } from "./session";
 import { approvalSchema, taskIdSchema, taskSchema } from "./task";
 
@@ -98,12 +103,16 @@ const COMPONENTS: readonly ComponentDefinition[] = [
   { name: "ActionResult", schema: actionResultSchema, io: "output" },
   { name: "ActionResponse", schema: actionResponseSchema, io: "output" },
   { name: "ChromeInstallerState", schema: chromeInstallerStateSchema, io: "output" },
+  { name: "ProviderConfig", schema: providerConfigSchema, io: "output" },
+  { name: "ProviderResponse", schema: providerResponseSchema, io: "output" },
+  { name: "UpdateProviderRequest", schema: providerConfigRequestSchema, io: "input" },
   { name: "Problem", schema: problemSchema, io: "output" },
 ];
 
 const TAGS = [
   "Health",
   "Browser",
+  "Providers",
   "Profiles",
   "Sessions",
   "Tasks",
@@ -293,6 +302,30 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
       responses: {
         "204": emptyResponse("Override lokal dihapus."),
         "401": UNAUTHORIZED,
+      },
+    },
+  },
+  "/providers": {
+    get: {
+      operationId: "getProviderConfig",
+      summary: "Konfigurasi provider model aktif",
+      tags: ["Providers"],
+      responses: {
+        "200": jsonResponse("Konfigurasi provider tanpa API key.", "ProviderResponse"),
+        "401": UNAUTHORIZED,
+      },
+    },
+    put: {
+      operationId: "updateProviderConfig",
+      summary: "Validasi dan simpan konfigurasi provider",
+      tags: ["Providers"],
+      requestBody: requestBody("UpdateProviderRequest"),
+      responses: {
+        "200": jsonResponse("Konfigurasi tersimpan tanpa API key.", "ProviderResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "422": UNPROCESSABLE,
+        "500": INTERNAL_ERROR,
       },
     },
   },

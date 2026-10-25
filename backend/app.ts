@@ -22,6 +22,12 @@ import type { ChromeInstallerState } from "../shared/chrome-installer";
 import { healthResponseSchema } from "../shared/contracts";
 import { createOpenApiDocument } from "../shared/openapi";
 import { profileIdSchema, type Profile } from "../shared/profile";
+import {
+  providerConfigRequestSchema,
+  providerResponseSchema,
+  type ProviderConfig,
+  type ProviderConfigRequest,
+} from "../shared/provider";
 import { sessionIdSchema, type Session } from "../shared/session";
 import { taskIdSchema } from "../shared/task";
 import type { ChromeLocalValidation } from "./chrome-local-binary";
@@ -62,6 +68,11 @@ export type SessionService = {
   close(sessionId: string): Promise<Session>;
 };
 
+export type ProviderConfigService = {
+  getConfig(): ProviderConfig;
+  setConfig(input: ProviderConfigRequest): Promise<ProviderConfig>;
+};
+
 export type AppOptions = {
   readonly token: string;
   readonly allowedOrigin: string;
@@ -72,6 +83,7 @@ export type AppOptions = {
   readonly actions: ActionService;
   readonly events: EventBus;
   readonly eventConnections: EventStreamRegistry;
+  readonly providers: ProviderConfigService;
   readonly eventHeartbeatMs?: number;
 };
 
@@ -191,6 +203,25 @@ export function createApp(options: AppOptions): Hono {
       data: options.chromeInstaller.getState(),
     });
     return c.json(body, 200);
+  });
+
+  app.get("/v1/providers", (c) => {
+    const body = providerResponseSchema.parse({ data: options.providers.getConfig() });
+    return c.json(body, 200);
+  });
+
+  app.put("/v1/providers", async (c) => {
+    const body = await parseJsonBody(c, providerConfigRequestSchema);
+    if (!body.ok) {
+      return problemResponse(c, 400, "Body permintaan tidak valid.");
+    }
+
+    try {
+      const config = await options.providers.setConfig(body.data);
+      return c.json(providerResponseSchema.parse({ data: config }), 200);
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
   });
 
   app.post("/v1/browser/download", (c) => {

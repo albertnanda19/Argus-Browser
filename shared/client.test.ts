@@ -15,6 +15,7 @@ import {
   type ArgusEvent,
 } from "./client";
 import type { HealthResponse, Problem } from "./contracts";
+import type { ProviderConfig, ProviderConfigRequest } from "./provider";
 import type { Approval, Task } from "./task";
 import type { Profile } from "./profile";
 import type { Session } from "./session";
@@ -110,6 +111,19 @@ const actionResponse: ActionResponse = {
   data: { action: "navigate", url: "https://example.com/" },
 };
 
+const providerConfig: ProviderConfig = {
+  provider: "gemini",
+  model: "gemini-2.5-flash",
+  configured: true,
+  updatedAt: timestamp,
+};
+
+const providerRequest: ProviderConfigRequest = {
+  provider: "gemini",
+  model: "gemini-2.5-flash",
+  apiKey: "unit-test-provider-key",
+};
+
 type FetchCall = {
   readonly input: RequestInfo | URL;
   readonly init: RequestInit | undefined;
@@ -179,6 +193,8 @@ function routeResponse(method: string, pathname: string): Response {
     return jsonResponse({ data: browserState });
   }
   if (key === "DELETE /v1/browser/local-executable") return emptyResponse();
+  if (key === "GET /v1/providers") return jsonResponse({ data: providerConfig });
+  if (key === "PUT /v1/providers") return jsonResponse({ data: providerConfig });
   if (key === "GET /v1/profiles") return jsonResponse(profileList);
   if (key === "POST /v1/profiles") return jsonResponse(profileResponse, 201);
   if (key === `DELETE /v1/profiles/${profileId}`) return emptyResponse();
@@ -326,6 +342,8 @@ describe("createArgusClient", () => {
       reason: "Target salah.",
     });
     await client.actions.run(sessionId, { action: "click", selector: "#submit" });
+    const providerResult = await client.providers.get();
+    const savedProvider = await client.providers.set(providerRequest);
 
     const expectedCalls: readonly (readonly [string, string])[] = [
       ["GET", "/v1/health"],
@@ -345,6 +363,8 @@ describe("createArgusClient", () => {
       ["POST", `/v1/tasks/${taskId}/cancel`],
       ["POST", `/v1/tasks/${taskId}/approval`],
       ["POST", `/v1/sessions/${sessionId}/actions`],
+      ["GET", "/v1/providers"],
+      ["PUT", "/v1/providers"],
     ];
 
     expect(stub.calls).toHaveLength(expectedCalls.length);
@@ -381,6 +401,27 @@ describe("createArgusClient", () => {
 
     expect(healthResult).toEqual(health);
     expect(browserResult).toEqual(browserState);
+    expect(providerResult).toEqual(providerConfig);
+    expect(savedProvider).toEqual(providerConfig);
+  });
+
+  it("exposes only the documented provider methods", () => {
+    const stub = createFetchStub(() =>
+      jsonResponse({ data: providerConfig }),
+    );
+    const client = createClient(stub.fetch);
+
+    expect(Object.keys(client.providers).sort()).toEqual(["get", "set"]);
+    expect(Object.keys(client).sort()).toEqual([
+      "actions",
+      "browser",
+      "events",
+      "health",
+      "profiles",
+      "providers",
+      "sessions",
+      "tasks",
+    ]);
   });
 
   it("sends JSON bodies only for endpoints that take input", async () => {
@@ -405,6 +446,7 @@ describe("createArgusClient", () => {
       reason: "Target salah.",
     });
     await client.actions.run(sessionId, { action: "click", selector: "#submit" });
+    await client.providers.set(providerRequest);
 
     const bodies = stub.calls.map((call, index) => {
       const body = call.init?.body;
@@ -423,6 +465,7 @@ describe("createArgusClient", () => {
     });
     expect(bodies[4]).toEqual({ approve: false, reason: "Target salah." });
     expect(bodies[5]).toEqual({ action: "click", selector: "#submit" });
+    expect(bodies[6]).toEqual(providerRequest);
   });
 
   it("normalizes a trailing slash and forwards pagination only when provided", async () => {

@@ -65,6 +65,17 @@ function createHarness(heartbeatMs = 60_000): Harness {
         throw new Error("Unused action execution.");
       },
     },
+    providers: {
+      getConfig: () => ({
+        provider: null,
+        model: null,
+        configured: false,
+        updatedAt: null,
+      }),
+      setConfig: async () => {
+        throw new Error("Unused provider update.");
+      },
+    },
     events,
     eventConnections: connections,
     eventHeartbeatMs: heartbeatMs,

@@ -177,6 +177,17 @@ function createHarness(options: HarnessOptions = {}) {
     sessions: sessionsService,
     tasks,
     actions,
+    providers: {
+      getConfig: () => ({
+        provider: null,
+        model: null,
+        configured: false,
+        updatedAt: null,
+      }),
+      setConfig: async () => {
+        throw new Error("Unused provider update.");
+      },
+    },
     events,
     eventConnections: createEventStreamRegistry(),
   });

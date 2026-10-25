@@ -8,6 +8,10 @@ import { chromeInstallerStateSchema } from "./chrome-installer";
 import { problemSchema } from "./contracts";
 import { createOpenApiDocument, type OpenApiOperation } from "./openapi";
 import { profileSchema } from "./profile";
+import {
+  providerConfigRequestSchema,
+  providerConfigSchema,
+} from "./provider";
 import { sessionSchema } from "./session";
 import { approvalSchema, taskSchema } from "./task";
 
@@ -19,6 +23,8 @@ const EXPECTED_OPERATIONS = [
   "POST /browser/download",
   "PUT /browser/local-executable",
   "DELETE /browser/local-executable",
+  "GET /providers",
+  "PUT /providers",
   "GET /profiles",
   "POST /profiles",
   "DELETE /profiles/{id}",
@@ -132,6 +138,7 @@ describe("OpenAPI document", () => {
     expect(document.tags.map((tag) => tag.name)).toEqual([
       "Health",
       "Browser",
+      "Providers",
       "Profiles",
       "Sessions",
       "Tasks",
@@ -142,9 +149,11 @@ describe("OpenAPI document", () => {
   });
 
   it("contains exactly the required operations", () => {
+    const document = createOpenApiDocument();
     const operations = allOperations().map(({ method, path }) => `${method.toUpperCase()} ${path}`);
 
-    expect(operations).toHaveLength(19);
+    expect(Object.keys(document.paths)).toHaveLength(16);
+    expect(operations).toHaveLength(21);
     expect(new Set(operations)).toEqual(new Set(EXPECTED_OPERATIONS));
   });
 
@@ -214,6 +223,30 @@ describe("OpenAPI document", () => {
     expect(schemas.ChromeInstallerState).toEqual(
       generatedJsonSchema(chromeInstallerStateSchema, "output"),
     );
+    expect(schemas.ProviderConfig).toEqual(generatedJsonSchema(providerConfigSchema, "output"));
+    expect(schemas.UpdateProviderRequest).toEqual(
+      generatedJsonSchema(providerConfigRequestSchema, "input"),
+    );
+  });
+
+  it("documents provider configuration without returning the API key", () => {
+    const document = createOpenApiDocument();
+    const schemas = document.components.schemas;
+    const request = schemas.UpdateProviderRequest;
+
+    expect(JSON.stringify(schemas.ProviderConfig)).not.toContain("apiKey");
+    expect(JSON.stringify(schemas.ProviderResponse)).not.toContain("apiKey");
+    expect(collectRefs(schemas.ProviderResponse)).toEqual([
+      "#/components/schemas/ProviderConfig",
+    ]);
+    expect(requiredOf(request)).toEqual(["provider", "model", "apiKey"]);
+
+    const operation = operationAt("put", "/providers");
+
+    expect(operation.tags).toEqual(["Providers"]);
+    expect(operation.responses["400"]).toBeDefined();
+    expect(operation.responses["422"]).toBeDefined();
+    expect(operation.responses["500"]).toBeDefined();
   });
 
   it("keeps optional request fields optional", () => {

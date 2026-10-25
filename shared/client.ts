@@ -33,6 +33,11 @@ import {
   type Problem,
 } from "./contracts";
 import { domainEventSchema, type DomainEvent } from "./event";
+import {
+  providerResponseSchema,
+  type ProviderConfig,
+  type ProviderConfigRequest,
+} from "./provider";
 
 const UNREACHABLE_MESSAGE = "Layanan Argus tidak dapat dihubungi.";
 const REJECTED_MESSAGE = "Layanan Argus menolak permintaan.";
@@ -117,6 +122,10 @@ export type ArgusClient = {
   };
   readonly actions: {
     run(sessionId: string, input: ActionRequest): Promise<ActionResponse>;
+  };
+  readonly providers: {
+    get(): Promise<ProviderConfig>;
+    set(input: ProviderConfigRequest): Promise<ProviderConfig>;
   };
   readonly events: {
     stream(options?: StreamEventsOptions): AsyncIterable<ArgusEvent>;
@@ -241,6 +250,15 @@ async function requestBrowserState(
   options: RequestOptions,
 ): Promise<ChromeInstallerState> {
   const response = await request(config, browserStateResponseSchema, path, options);
+  return response.data;
+}
+
+async function requestProviderConfig(
+  config: ClientConfig,
+  path: string,
+  options: RequestOptions,
+): Promise<ProviderConfig> {
+  const response = await request(config, providerResponseSchema, path, options);
   return response.data;
 }
 
@@ -500,6 +518,11 @@ export function createArgusClient(options: ArgusClientOptions): ArgusClient {
           `/sessions/${encodeURIComponent(sessionId)}/actions`,
           { method: "POST", body: input },
         ),
+    },
+    providers: {
+      get: () => requestProviderConfig(config, "/providers", { method: "GET" }),
+      set: (input) =>
+        requestProviderConfig(config, "/providers", { method: "PUT", body: input }),
     },
     events: {
       stream: (streamOptions) => streamEvents(config, streamOptions ?? {}),

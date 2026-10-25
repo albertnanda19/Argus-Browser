@@ -72,6 +72,17 @@ function createHarness() {
         throw new Error("Unused action execution.");
       },
     },
+    providers: {
+      getConfig: () => ({
+        provider: null,
+        model: null,
+        configured: false,
+        updatedAt: null,
+      }),
+      setConfig: async () => {
+        throw new Error("Unused provider update.");
+      },
+    },
     events,
     eventConnections: createEventStreamRegistry(),
   });
@@ -111,7 +122,7 @@ describe("GET /v1/openapi.json", () => {
     );
 
     expect(body.openapi).toBe("3.1.0");
-    expect(operationCount).toBe(19);
+    expect(operationCount).toBe(21);
   });
 
   it("builds the document once when the app is created", async () => {
