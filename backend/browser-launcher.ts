@@ -1,3 +1,4 @@
+import { createServer } from "node:net";
 import type { BrowserContext } from "playwright-core";
 
 export type BrowserLocator = {
@@ -24,10 +25,132 @@ export type LaunchBrowserOptions = {
   readonly userDataDir: string;
 };
 
-export type LaunchBrowser = (options: LaunchBrowserOptions) => Promise<BrowserSessionContext>;
+export type BrowserLaunchResult = {
+  readonly context: BrowserSessionContext;
+  readonly cdpUrl: string;
+};
 
-export const launchBrowser: LaunchBrowser = async (options) => {
+export type LaunchBrowser = (options: LaunchBrowserOptions) => Promise<BrowserLaunchResult>;
+
+export type CdpLaunchArguments = {
+  readonly args: string[];
+  readonly ignoreDefaultArgs: string[];
+};
+
+export type LaunchBrowserDependencies = {
+  readonly allocateCdpPort?: () => Promise<number>;
+  readonly waitForCdpReady?: (cdpUrl: string) => Promise<void>;
+};
+
+const CDP_READY_TIMEOUT_MS = 5_000;
+const CDP_PROBE_TIMEOUT_MS = 1_000;
+const CDP_POLL_INTERVAL_MS = 100;
+const CDP_CLOSE_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => {
+      rejectPromise(new Error(`Timed out after ${timeoutMs} ms.`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolvePromise(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        rejectPromise(error);
+      },
+    );
+  });
+}
+
+export function createCdpUrl(port: number): string {
+  return `http://127.0.0.1:${port}`;
+}
+
+export function createCdpLaunchArguments(port: number): CdpLaunchArguments {
+  return {
+    args: [
+      `--remote-debugging-port=${port}`,
+      "--remote-debugging-address=127.0.0.1",
+      "--remote-allow-origins=*",
+      "--enable-unsafe-extension-debugging",
+    ],
+    ignoreDefaultArgs: ["--disable-extensions"],
+  };
+}
+
+export async function allocateCdpPort(): Promise<number> {
+  return await new Promise<number>((resolvePort, rejectPort) => {
+    const server = createServer();
+    server.once("error", rejectPort);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        server.close();
+        rejectPort(new Error("CDP port allocation returned no address."));
+        return;
+      }
+
+      server.close((error) => {
+        if (error !== undefined) {
+          rejectPort(error);
+          return;
+        }
+        resolvePort(address.port);
+      });
+    });
+  });
+}
+
+async function probeCdp(cdpUrl: string, timeoutMs: number): Promise<boolean> {
+  try {
+    const response = await fetch(`${cdpUrl}/json/version`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function waitForCdpReady(
+  cdpUrl: string,
+  probe: (url: string, timeoutMs: number) => Promise<boolean> = probeCdp,
+): Promise<void> {
+  const deadline = Date.now() + CDP_READY_TIMEOUT_MS;
+
+  for (;;) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`CDP endpoint is not ready after ${CDP_READY_TIMEOUT_MS} ms.`);
+    }
+
+    if (await probe(cdpUrl, Math.min(CDP_PROBE_TIMEOUT_MS, remainingMs))) {
+      return;
+    }
+
+    const waitMs = deadline - Date.now();
+    if (waitMs <= 0) {
+      throw new Error(`CDP endpoint is not ready after ${CDP_READY_TIMEOUT_MS} ms.`);
+    }
+
+    await new Promise<void>((resolveDelay) => {
+      setTimeout(resolveDelay, Math.min(CDP_POLL_INTERVAL_MS, waitMs));
+    });
+  }
+}
+
+export async function launchBrowserWithDependencies(
+  options: LaunchBrowserOptions,
+  dependencies: LaunchBrowserDependencies = {},
+): Promise<BrowserLaunchResult> {
   const { chromium } = await import("playwright-core");
+  const port = await (dependencies.allocateCdpPort ?? allocateCdpPort)();
+  const cdpUrl = createCdpUrl(port);
+  const launchArguments = createCdpLaunchArguments(port);
   const context: BrowserContext = await chromium.launchPersistentContext(options.userDataDir, {
     executablePath: options.executablePath,
     headless: false,
@@ -35,6 +158,19 @@ export const launchBrowser: LaunchBrowser = async (options) => {
     handleSIGINT: false,
     handleSIGTERM: false,
     handleSIGHUP: false,
+    args: launchArguments.args,
+    ignoreDefaultArgs: launchArguments.ignoreDefaultArgs,
   });
-  return context;
-};
+
+  try {
+    await (dependencies.waitForCdpReady ?? waitForCdpReady)(cdpUrl);
+  } catch (error) {
+    await withTimeout(context.close(), CDP_CLOSE_TIMEOUT_MS).catch(() => undefined);
+    throw error;
+  }
+
+  return { context, cdpUrl };
+}
+
+export const launchBrowser: LaunchBrowser = (options) =>
+  launchBrowserWithDependencies(options);

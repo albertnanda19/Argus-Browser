@@ -27,6 +27,7 @@ export type SessionManager = {
   listActive(): Session[];
   get(sessionId: string): Session | null;
   getContext(sessionId: string): BrowserSessionContext | null;
+  getCdpUrl(sessionId: string): string | null;
   close(sessionId: string): Promise<Session>;
   shutdown(): Promise<void>;
 };
@@ -34,6 +35,7 @@ export type SessionManager = {
 type SessionRecord = {
   session: Session;
   context: BrowserSessionContext | null;
+  cdpUrl: string | null;
   startPromise: Promise<Session> | null;
   closePromise: Promise<Session> | null;
   isCloseRequested: boolean;
@@ -94,6 +96,7 @@ class SessionManagerImpl implements SessionManager {
         pid: null,
       },
       context: null,
+      cdpUrl: null,
       startPromise: null,
       closePromise: null,
       isCloseRequested: false,
@@ -124,6 +127,14 @@ class SessionManagerImpl implements SessionManager {
       return null;
     }
     return record.context;
+  }
+
+  getCdpUrl(sessionId: string): string | null {
+    const record = this.sessions.get(sessionId);
+    if (record === undefined || record.session.status !== "ready") {
+      return null;
+    }
+    return record.cdpUrl;
   }
 
   async close(sessionId: string): Promise<Session> {
@@ -157,12 +168,14 @@ class SessionManagerImpl implements SessionManager {
       await this.requireProfile(record.session.profileId);
       const executablePath = this.requireExecutablePath();
 
-      context = await this.launchBrowser({
+      const launched = await this.launchBrowser({
         executablePath,
         userDataDir: resolveProfileDir(this.appDataDir, record.session.profileId),
       });
 
-      record.context = context;
+      context = launched.context;
+      record.context = launched.context;
+      record.cdpUrl = launched.cdpUrl;
       context.on("close", () => this.handleContextClose(record));
       record.session = { ...record.session, status: "ready" };
 
@@ -180,6 +193,8 @@ class SessionManagerImpl implements SessionManager {
     if (record.startPromise !== null) {
       await record.startPromise.catch(() => undefined);
     }
+
+    record.cdpUrl = null;
 
     if (record.session.status === "closed" || record.session.status === "error") {
       return { ...record.session };
@@ -258,6 +273,8 @@ class SessionManagerImpl implements SessionManager {
   }
 
   private failStart(record: SessionRecord, error: unknown): SessionError {
+    record.cdpUrl = null;
+
     if (record.session.status === "starting") {
       record.session = {
         ...record.session,
@@ -276,6 +293,7 @@ class SessionManagerImpl implements SessionManager {
 
   private handleContextClose(record: SessionRecord): void {
     record.context = null;
+    record.cdpUrl = null;
 
     if (
       record.isCloseRequested ||

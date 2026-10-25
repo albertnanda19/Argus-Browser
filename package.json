@@ -12,9 +12,11 @@
     "build:renderer": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "smoke:browser": "npm run build:node && node dist/node/backend/scripts/smoke-browser.js"
+    "smoke:browser": "npm run build:node && node dist/node/backend/scripts/smoke-browser.js",
+    "smoke:attach": "npm run build:node && node dist/node/backend/scripts/smoke-attach.js"
   },
   "dependencies": {
+    "@browserbasehq/stagehand": "4.3.0",
     "@hono/node-server": "2.1.5",
     "hono": "4.13.13",
     "node-stream-zip": "1.16.0",

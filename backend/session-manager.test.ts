@@ -8,7 +8,12 @@ import {
   createSessionManager,
   type ChromeExecutableSource,
 } from "./session-manager";
-import type { BrowserSessionContext, LaunchBrowser, LaunchBrowserOptions } from "./browser-launcher";
+import type {
+  BrowserLaunchResult,
+  BrowserSessionContext,
+  LaunchBrowser,
+  LaunchBrowserOptions,
+} from "./browser-launcher";
 import { createProfile, getProfile, resolveProfileDir } from "./profile-store";
 
 const testRoot = resolve(
@@ -20,6 +25,7 @@ const testRoot = resolve(
 );
 
 const now = new Date("2026-10-25T10:00:00.000Z");
+const fakeCdpUrl = "http://127.0.0.1:59876";
 
 type FakeContext = BrowserSessionContext & {
   readonly closeCalls: number;
@@ -124,7 +130,7 @@ function createFakeLauncher(contexts: BrowserSessionContext[]): FakeLauncher {
       if (context === undefined) {
         throw new Error("No fake context available.");
       }
-      return context;
+      return { context, cdpUrl: fakeCdpUrl };
     },
   };
 }
@@ -285,7 +291,7 @@ describe("start", () => {
       if (attempts === 1) {
         throw new Error("spawn /Users/secret/profile/chrome EACCES");
       }
-      return createFakeContext();
+      return { context: createFakeContext(), cdpUrl: fakeCdpUrl };
     };
     const manager = createManager(appDataDir, { launchBrowser });
 
@@ -310,7 +316,7 @@ describe("start", () => {
     const appDataDir = newAppDataDir();
     const profile = await createProfile(appDataDir, "Sesi");
     const calls: LaunchBrowserOptions[] = [];
-    let resolveLaunch: (context: BrowserSessionContext) => void = () => undefined;
+    let resolveLaunch: (result: BrowserLaunchResult) => void = () => undefined;
     const launchBrowser: LaunchBrowser = (options) => {
       calls.push(options);
       return new Promise((resolvePromise) => {
@@ -331,7 +337,7 @@ describe("start", () => {
       expect(calls).toHaveLength(1);
     });
 
-    resolveLaunch(createFakeContext());
+    resolveLaunch({ context: createFakeContext(), cdpUrl: fakeCdpUrl });
     await expect(first).resolves.toMatchObject({ status: "ready" });
 
     await manager.shutdown();
@@ -424,7 +430,7 @@ describe("close", () => {
     const appDataDir = newAppDataDir();
     const profile = await createProfile(appDataDir, "Sesi");
     const context = createFakeContext();
-    let resolveLaunch: (value: BrowserSessionContext) => void = () => undefined;
+    let resolveLaunch: (value: BrowserLaunchResult) => void = () => undefined;
     let notifyLaunchStarted: () => void = () => undefined;
     const launchStarted = new Promise<void>((resolvePromise) => {
       notifyLaunchStarted = resolvePromise;
@@ -446,7 +452,7 @@ describe("close", () => {
     expect(sessionId).toBeDefined();
 
     const closing = manager.close(String(sessionId));
-    resolveLaunch(context);
+    resolveLaunch({ context, cdpUrl: fakeCdpUrl });
 
     await expect(starting).resolves.toMatchObject({ status: "ready" });
     await expect(closing).resolves.toMatchObject({ status: "closed" });
@@ -612,5 +618,76 @@ describe("get and listActive", () => {
 
     expect(manager.listActive()).toEqual([]);
     expect(manager.get(session.id)).toMatchObject({ status: "closed" });
+  });
+});
+
+describe("getCdpUrl", () => {
+  it("returns the cdp url while the session is ready", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const manager = createManager(appDataDir, {
+      launchBrowser: createFakeLauncher([createFakeContext()]).launchBrowser,
+    });
+
+    const session = await manager.start(profile.id);
+
+    expect(manager.getCdpUrl(session.id)).toBe(fakeCdpUrl);
+
+    await manager.shutdown();
+  });
+
+  it("returns null after close", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const manager = createManager(appDataDir, {
+      launchBrowser: createFakeLauncher([createFakeContext()]).launchBrowser,
+    });
+    const session = await manager.start(profile.id);
+
+    await manager.close(session.id);
+
+    expect(manager.getCdpUrl(session.id)).toBeNull();
+  });
+
+  it("returns null when the session fails to start", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const manager = createManager(appDataDir, {
+      launchBrowser: async () => {
+        throw new Error("CDP endpoint is not ready after 5000 ms.");
+      },
+    });
+
+    await expect(manager.start(profile.id)).rejects.toMatchObject({
+      code: "session_launch_failed",
+    });
+
+    const logged = String(warn.mock.calls[0]?.[0]);
+    const sessionId = logged.match(/s_[0-9a-f]{16}/)?.[0];
+    expect(sessionId).toBeDefined();
+    expect(manager.getCdpUrl(String(sessionId))).toBeNull();
+    expect(manager.listActive()).toEqual([]);
+  });
+
+  it("returns null after the context closes unexpectedly", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const context = createFakeContext();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const manager = createManager(appDataDir, {
+      launchBrowser: createFakeLauncher([context]).launchBrowser,
+    });
+    const session = await manager.start(profile.id);
+
+    context.emitClose();
+
+    expect(manager.getCdpUrl(session.id)).toBeNull();
+  });
+
+  it("returns null for an unknown session", () => {
+    const manager = createManager(newAppDataDir());
+
+    expect(manager.getCdpUrl("s_aaaaaaaaaaaaaaaa")).toBeNull();
   });
 });
