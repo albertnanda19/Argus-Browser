@@ -73,6 +73,11 @@ export type ProviderConfigService = {
   setConfig(input: ProviderConfigRequest): Promise<ProviderConfig>;
 };
 
+export type TaskRunnerApi = {
+  start(taskId: string): void;
+  cancel(taskId: string): void;
+};
+
 export type AppOptions = {
   readonly token: string;
   readonly allowedOrigin: string;
@@ -80,6 +85,7 @@ export type AppOptions = {
   readonly profiles: ProfileService;
   readonly sessions: SessionService;
   readonly tasks: TaskService;
+  readonly runner: TaskRunnerApi;
   readonly actions: ActionService;
   readonly events: EventBus;
   readonly eventConnections: EventStreamRegistry;
@@ -422,6 +428,7 @@ export function createApp(options: AppOptions): Hono {
 
     try {
       const task = options.tasks.createTask(parsedId.data, body.data, idempotencyKey.key);
+      options.runner.start(task.id);
       return c.json(taskResponseSchema.parse({ data: task }), 202);
     } catch (error) {
       return handleKnownError(c, error);
@@ -450,6 +457,7 @@ export function createApp(options: AppOptions): Hono {
 
     try {
       const task = options.tasks.cancelTask(parsedId.data);
+      options.runner.cancel(parsedId.data);
       return c.json(taskResponseSchema.parse({ data: task }), 202);
     } catch (error) {
       return handleKnownError(c, error);

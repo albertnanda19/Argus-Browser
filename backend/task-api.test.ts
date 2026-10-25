@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
 import type { Profile } from "../shared/profile";
 import type { Session } from "../shared/session";
@@ -54,6 +54,10 @@ function createHarness() {
     events,
     now: () => currentTime,
   });
+  const runner = {
+    start: vi.fn(),
+    cancel: vi.fn(),
+  };
 
   const profilesService: ProfileService = {
     list: async (): Promise<Profile[]> => [],
@@ -78,6 +82,7 @@ function createHarness() {
     profiles: profilesService,
     sessions: sessionsService,
     tasks,
+    runner,
     actions: {
       execute: async () => {
         throw new Error("Unused action execution.");
@@ -103,6 +108,7 @@ function createHarness() {
     tasks,
     events,
     sessions,
+    runner,
     advance(milliseconds: number) {
       currentTime = new Date(currentTime.getTime() + milliseconds);
     },
@@ -142,7 +148,7 @@ async function json<T>(response: Response): Promise<T> {
 
 describe("POST /v1/sessions/:id/tasks", () => {
   it("creates a queued task with 202", async () => {
-    const { app } = createHarness();
+    const { app, runner } = createHarness();
     const response = await app.request(
       `/v1/sessions/${readySessionId}/tasks`,
       taskRequest(
@@ -161,6 +167,7 @@ describe("POST /v1/sessions/:id/tasks", () => {
     expect(body.data.status).toBe("queued");
     expect(body.data.createdAt).toBe(fixedNow);
     expect(body.data.completedAt).toBeNull();
+    expect(runner.start).toHaveBeenCalledWith(body.data.id);
   });
 
   it("returns the same task for a replayed key without a new record", async () => {
@@ -184,6 +191,9 @@ describe("POST /v1/sessions/:id/tasks", () => {
     expect(second.status).toBe(202);
     expect(secondBody.data.id).toBe(firstBody.data.id);
     expect(harness.tasks.listBySession(readySessionId)).toHaveLength(1);
+    expect(harness.runner.start).toHaveBeenCalledTimes(2);
+    expect(harness.runner.start).toHaveBeenNthCalledWith(1, firstBody.data.id);
+    expect(harness.runner.start).toHaveBeenNthCalledWith(2, firstBody.data.id);
   });
 
   it("trims the idempotency key", async () => {
@@ -440,6 +450,7 @@ describe("POST /v1/tasks/:id/cancel", () => {
     const body = await json<{ data: Task }>(response);
     expect(body.data.status).toBe("cancelled");
     expect(body.data.completedAt).toBe(fixedNow);
+    expect(harness.runner.cancel).toHaveBeenCalledWith(task.id);
 
     const fetched = await harness.app.request(`/v1/tasks/${task.id}`, withAuth());
     await expect(fetched.json()).resolves.toEqual({ data: body.data });
@@ -453,6 +464,7 @@ describe("POST /v1/tasks/:id/cancel", () => {
     );
     const task = (await json<{ data: Task }>(created)).data;
     await harness.app.request(`/v1/tasks/${task.id}/cancel`, withAuth({ method: "POST" }));
+    harness.runner.cancel.mockClear();
     const response = await harness.app.request(
       `/v1/tasks/${task.id}/cancel`,
       withAuth({ method: "POST" }),
@@ -465,6 +477,7 @@ describe("POST /v1/tasks/:id/cancel", () => {
       status: 409,
       detail: "Task tidak dapat dibatalkan pada status ini.",
     });
+    expect(harness.runner.cancel).not.toHaveBeenCalled();
   });
 });
 

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { serve } from "@hono/node-server";
 import { createActionManager } from "./action-manager";
+import { createAgentStepStore } from "./agent-steps";
 import { createApp, type ProfileService, type SessionService } from "./app";
 import { resolveAppDataDir, writeApiCredentials } from "./app-data";
 import { createChromeInstaller } from "./chrome-installer";
@@ -13,6 +14,7 @@ import { createProviderRegistry } from "./provider-registry";
 import { createProviderService } from "./provider-service";
 import { createSessionManager } from "./session-manager";
 import { createTaskManager } from "./task-manager";
+import { createTaskRunner } from "./task-runner";
 
 const SHUTDOWN_TIMEOUT_MS = 9_000;
 
@@ -36,9 +38,18 @@ async function main(): Promise<void> {
   const eventConnections = createEventStreamRegistry();
   const tasks = createTaskManager({ sessions: sessionManager, events });
   const actions = createActionManager({ sessions: sessionManager, tasks, events });
+  const registry = createProviderRegistry();
   const providers = await createProviderService({
     appDataDir,
-    registry: createProviderRegistry(),
+    registry,
+  });
+  const steps = createAgentStepStore();
+  const runner = createTaskRunner({
+    sessions: sessionManager,
+    tasks,
+    providers,
+    registry,
+    steps,
   });
 
   const profiles: ProfileService = {
@@ -56,6 +67,7 @@ async function main(): Promise<void> {
       profiles,
       sessions,
       tasks,
+      runner,
       actions,
       events,
       eventConnections,
@@ -87,6 +99,11 @@ async function main(): Promise<void> {
     eventConnections.shutdown();
 
     const stop = async (): Promise<void> => {
+      await runner.shutdown().catch((error: unknown) => {
+        console.warn(
+          `Task runner shutdown failed: ${error instanceof Error ? error.name : "unknown"}`,
+        );
+      });
       await sessionManager.shutdown().catch((error: unknown) => {
         console.warn(
           `Session shutdown failed: ${error instanceof Error ? error.name : "unknown"}`,

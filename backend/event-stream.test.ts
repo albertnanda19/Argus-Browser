@@ -60,6 +60,10 @@ function createHarness(heartbeatMs = 60_000): Harness {
       },
     },
     tasks: createTaskManager({ sessions: { get: () => null }, events }),
+    runner: {
+      start: () => undefined,
+      cancel: () => undefined,
+    },
     actions: {
       execute: async () => {
         throw new Error("Unused action execution.");

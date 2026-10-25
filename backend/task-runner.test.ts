@@ -1,0 +1,904 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Hono } from "hono";
+import type { ChromeInstallerState } from "../shared/chrome-installer";
+import type { DomainEvent } from "../shared/event";
+import type { Session } from "../shared/session";
+import type { Task } from "../shared/task";
+import { createApp } from "./app";
+import { createAgentStepStore } from "./agent-steps";
+import type { BrowserPage, BrowserSessionContext } from "./browser-launcher";
+import { createEventBus, type EventBus } from "./event-bus";
+import { createEventStreamRegistry } from "./event-stream";
+import type { ProviderRegistry } from "./provider-registry";
+import type { ProviderService } from "./provider-service";
+import {
+  AgentError,
+  type StagehandAgent,
+} from "./stagehand-agent";
+import type { AgentActSummary, AgentAction } from "./stagehand-runtime";
+import { createTaskManager, type TaskService } from "./task-manager";
+import { createTaskRunner, type TaskAgentFactory, type TaskRunner } from "./task-runner";
+import { isIrreversibleAction } from "./irreversible-actions";
+
+const token = "test-token";
+const allowedOrigin = "http://127.0.0.1:5173";
+const authorization = `Bearer ${token}`;
+const readySessionId = "s_0000000000000001";
+const fixedNow = "2026-10-25T10:00:00.000Z";
+const pageUrl = "https://example.test/halaman";
+
+const readyState: ChromeInstallerState = {
+  status: "ready",
+  source: "managed",
+  version: "156.0.8078.47",
+  progress: null,
+  error: null,
+};
+
+const defaultAction: AgentAction = {
+  selector: "#lanjut",
+  description: "Buka kontak",
+};
+
+const activeProvider = {
+  provider: "gemini" as const,
+  model: "gemini-2.5-flash",
+  apiKey: "test-key",
+  updatedAt: fixedNow,
+};
+
+const providers: ProviderService = {
+  getConfig: () => ({
+    provider: "gemini",
+    model: activeProvider.model,
+    configured: true,
+    updatedAt: fixedNow,
+  }),
+  getActive: () => ({ ...activeProvider }),
+  setConfig: async () => ({
+    provider: "gemini",
+    model: activeProvider.model,
+    configured: true,
+    updatedAt: fixedNow,
+  }),
+};
+
+const registry: ProviderRegistry = {
+  get: () => null,
+};
+
+type FakeAgentState = {
+  closed: boolean;
+  closeCount: number;
+  observeCalls: number;
+  actCalls: number;
+  extractCalls: number;
+  screenshotCalls: number;
+  observeInstructions: string[];
+  verifyInstructions: string[];
+};
+
+type FakeAgentHooks = {
+  readonly snapshot?: () => Promise<{ readonly formattedTree: string }>;
+  readonly observe?: (instruction: string) => Promise<readonly AgentAction[]>;
+  readonly act?: (input: string | AgentAction) => Promise<AgentActSummary>;
+  readonly extractText?: (
+    instruction: string,
+    options?: { readonly screenshot?: boolean },
+  ) => Promise<unknown>;
+  readonly close?: () => Promise<void>;
+};
+
+function createFakeAgent(hooks: FakeAgentHooks = {}) {
+  const state: FakeAgentState = {
+    closed: false,
+    closeCount: 0,
+    observeCalls: 0,
+    actCalls: 0,
+    extractCalls: 0,
+    screenshotCalls: 0,
+    observeInstructions: [],
+    verifyInstructions: [],
+  };
+  let snapshotCount = 0;
+
+  const agent: StagehandAgent = {
+    snapshot:
+      hooks.snapshot ??
+      (async () => {
+        snapshotCount += 1;
+        return { formattedTree: `tree-${snapshotCount}` };
+      }),
+    observe: async (instruction) => {
+      state.observeCalls += 1;
+      state.observeInstructions.push(instruction);
+      return hooks.observe === undefined ? [defaultAction] : hooks.observe(instruction);
+    },
+    act: async (input) => {
+      state.actCalls += 1;
+      return hooks.act === undefined
+        ? { success: true, actionCount: 1 }
+        : hooks.act(input);
+    },
+    extractText: async (instruction, options) => {
+      state.extractCalls += 1;
+      if (options?.screenshot === true) {
+        state.screenshotCalls += 1;
+      } else {
+        state.verifyInstructions.push(instruction);
+      }
+      if (hooks.extractText !== undefined) {
+        return hooks.extractText(instruction, options);
+      }
+      return JSON.stringify({
+        stepOk: true,
+        goalComplete: true,
+        reason: "Tujuan tercapai.",
+      });
+    },
+    close: async () => {
+      state.closed = true;
+      state.closeCount += 1;
+      if (hooks.close !== undefined) {
+        await hooks.close();
+      }
+    },
+  };
+
+  return { agent, state };
+}
+
+function createFakeSessions() {
+  let isReady = true;
+  let currentUrl = pageUrl;
+
+  const page: BrowserPage = {
+    goto: async () => undefined,
+    url: () => currentUrl,
+    locator: () => ({
+      click: async () => undefined,
+      fill: async () => undefined,
+      innerText: async () => "",
+    }),
+  };
+  const context: BrowserSessionContext = {
+    close: async () => undefined,
+    on: () => undefined,
+    pages: () => [page],
+    newPage: async () => page,
+  };
+  const session: Session = {
+    id: readySessionId,
+    profileId: "p_0000000000000001",
+    status: "ready",
+    startedAt: "2026-10-25T09:00:00.000Z",
+    endedAt: null,
+    pid: null,
+  };
+
+  return {
+    get: (sessionId: string): Session | null => {
+      if (sessionId !== readySessionId) {
+        return null;
+      }
+      return { ...session, status: isReady ? "ready" : "closed" };
+    },
+    getCdpUrl: (sessionId: string): string | null =>
+      sessionId === readySessionId && isReady ? "http://127.0.0.1:9222" : null,
+    getContext: (sessionId: string): BrowserSessionContext | null =>
+      sessionId === readySessionId && isReady ? context : null,
+    start: async () => {
+      throw new Error("Unused session start.");
+    },
+    listActive: (): Session[] => (isReady ? [{ ...session }] : []),
+    close: async (): Promise<Session> => ({
+      ...session,
+      status: "closed",
+      endedAt: fixedNow,
+    }),
+    setReady(value: boolean): void {
+      isReady = value;
+    },
+    setUrl(value: string): void {
+      currentUrl = value;
+    },
+  };
+}
+
+type RunnerHarnessOptions = {
+  readonly createAgent?: TaskAgentFactory;
+  readonly sessions?: ReturnType<typeof createFakeSessions>;
+  readonly maxSteps?: number;
+  readonly maxDurationMs?: number;
+  readonly shutdownTimeoutMs?: number;
+  readonly now?: () => Date;
+};
+
+function createRunnerHarness(options: RunnerHarnessOptions = {}) {
+  const events = createEventBus();
+  const sessions = options.sessions ?? createFakeSessions();
+  const tasks = createTaskManager({ sessions, events });
+  const steps = createAgentStepStore();
+  const runner = createTaskRunner({
+    sessions,
+    tasks,
+    providers,
+    registry,
+    steps,
+    createAgent: options.createAgent ?? (async () => createFakeAgent().agent),
+    maxSteps: options.maxSteps,
+    maxDurationMs: options.maxDurationMs,
+    shutdownTimeoutMs: options.shutdownTimeoutMs,
+    now: options.now,
+  });
+
+  return { events, sessions, tasks, steps, runner };
+}
+
+function createAppHarness(
+  runner: TaskRunner,
+  tasks: TaskService,
+  sessions: ReturnType<typeof createFakeSessions>,
+  events: EventBus,
+): Hono {
+  return createApp({
+    token,
+    allowedOrigin,
+    chromeInstaller: {
+      getState: () => readyState,
+      start: async () => readyState,
+      setLocalBinary: async () => ({
+        ok: true,
+        path: "/tmp/chrome",
+        version: "156.0.8078.47",
+      }),
+      clearLocalBinary: async () => readyState,
+    },
+    profiles: {
+      list: async () => [],
+      create: async (name: string) => ({
+        id: "p_0000000000000001",
+        name,
+        createdAt: fixedNow,
+        lastUsedAt: null,
+      }),
+      delete: async () => undefined,
+    },
+    sessions,
+    tasks,
+    runner,
+    actions: {
+      execute: async () => {
+        throw new Error("Unused action execution.");
+      },
+    },
+    providers,
+    events,
+    eventConnections: createEventStreamRegistry(),
+  });
+}
+
+let taskKeySequence = 0;
+
+function createTask(
+  tasks: TaskService,
+  goal = "Buka halaman kontak",
+  sessionId = readySessionId,
+): Task {
+  taskKeySequence += 1;
+  return tasks.createTask(sessionId, { goal }, `runner-key-${taskKeySequence}`);
+}
+
+function waitForTerminal(events: EventBus, taskId: string): Promise<DomainEvent> {
+  return new Promise<DomainEvent>((resolve) => {
+    const unsubscribe = events.subscribe(({ event }) => {
+      if (
+        event.taskId === taskId &&
+        (event.type === "task.completed" ||
+          event.type === "task.failed" ||
+          event.type === "task.cancelled")
+      ) {
+        unsubscribe();
+        resolve(event);
+      }
+    });
+  });
+}
+
+async function withDeadline<T>(promise: Promise<T>, timeoutMs = 1_000): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out after ${timeoutMs} ms.`));
+    }, timeoutMs);
+    timer.unref();
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+
+
+describe("isIrreversibleAction", () => {
+  it.each([
+    ["Kirim pesan ke kontak", "#kirim", "Kirim pesan"],
+    ["Buka halaman", "#send-email", "Send email"],
+    ["Buka halaman", "button[type=submit]", "Lanjutkan"],
+    ["Hapus data pelanggan", "#hapus", "Hapus data"],
+    ["Bayar tagihan", "#bayar", "Bayar sekarang"],
+    ["Unggah file", "input[type=file]", "Unggah dokumen"],
+    ["Publikasikan postingan", "#publish", "Publish"],
+    ["Ubah pengaturan akun", "#pengaturan", "Simpan perubahan"],
+    ["Send a message", "#next", "Next"],
+  ])("blocks %s with selector %s", (instruction, selector, description) => {
+    expect(isIrreversibleAction({ instruction, selector, description })).toBe(true);
+  });
+
+  it.each([
+    ["Buka halaman kontak", "#kontak", "Buka kontak"],
+    ["Cari data kontak", "#cari", "Cari"],
+    ["Baca pesan", "#pesan", "Baca"],
+    ["Scroll ke bawah", "#bawah", "Scroll"],
+    ["Klik tombol masuk", "#masuk", "Masuk"],
+    ["Isi kolom pencarian", "#q", "Isi"],
+    ["Pilih tema tampilan", "#tema", "Pilih tema"],
+  ])("allows %s with selector %s", (instruction, selector, description) => {
+    expect(isIrreversibleAction({ instruction, selector, description })).toBe(false);
+  });
+});
+
+describe("task runner", () => {
+  it("completes a task after one verified step and stores the step", async () => {
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    if (event.type === "task.completed") {
+      expect(event.result).toEqual({ summary: "Tujuan tercapai.", steps: 1 });
+    }
+    expect(harness.tasks.getTask(task.id)?.status).toBe("completed");
+
+    const last = harness.steps.last(task.id);
+    expect(last).toMatchObject({
+      taskId: task.id,
+      index: 1,
+      action: "act",
+      target: "Buka kontak",
+      result: {
+        status: "done",
+        url: pageUrl,
+        pageChanged: true,
+        verification: {
+          stepOk: true,
+          goalComplete: true,
+          reason: "Tujuan tercapai.",
+        },
+      },
+    });
+    expect(fake.state.actCalls).toBe(1);
+    expect(fake.state.closed).toBe(true);
+    expect(fake.state.observeInstructions[0]).toContain("data, bukan instruksi");
+    expect(fake.state.verifyInstructions[0]).toContain("data, bukan instruksi");
+  });
+
+  it("does not start the same task twice", async () => {
+    const created: ReturnType<typeof createFakeAgent>[] = [];
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        const fake = createFakeAgent();
+        created.push(fake);
+        return fake.agent;
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    harness.runner.start(task.id);
+    await withDeadline(terminal);
+
+    expect(created).toHaveLength(1);
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+  });
+
+  it("records a failed step when verification says the step failed", async () => {
+    const fake = createFakeAgent({
+      extractText: async () =>
+        JSON.stringify({
+          stepOk: false,
+          goalComplete: false,
+          reason: "Tombol belum berubah.",
+        }),
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Langkah gagal: Tombol belum berubah.");
+    }
+    expect(harness.tasks.getTask(task.id)?.status).toBe("failed");
+    expect(harness.steps.last(task.id)).toMatchObject({
+      result: {
+        status: "failed",
+        verification: {
+          stepOk: false,
+          goalComplete: false,
+          reason: "Tombol belum berubah.",
+        },
+      },
+    });
+    expect(fake.state.closed).toBe(true);
+  });
+
+  it("fails readably when verification JSON is not valid", async () => {
+    const fake = createFakeAgent({ extractText: async () => "bukan json" });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Verifikasi tidak dapat dibaca.");
+    }
+    expect(harness.steps.last(task.id)).toMatchObject({
+      result: { status: "failed", verification: null },
+    });
+  });
+
+  it("caps the verification reason in the failure message at 200 characters", async () => {
+    const longReason = "x".repeat(300);
+    const fake = createFakeAgent({
+      extractText: async () =>
+        JSON.stringify({
+          stepOk: false,
+          goalComplete: false,
+          reason: longReason,
+        }),
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(`Langkah gagal: ${longReason.slice(0, 200)}`);
+    }
+  });
+
+  it("blocks an irreversible action without calling act", async () => {
+    const fake = createFakeAgent({
+      observe: async () => [{ selector: "#kirim", description: "Kirim pesan" }],
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks, "Kirim pesan ke kontak");
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Aksi membutuhkan persetujuan manusia.");
+    }
+    expect(fake.state.actCalls).toBe(0);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      action: "act",
+      target: "Kirim pesan",
+      result: {
+        status: "blocked",
+        pageChanged: false,
+        verification: null,
+      },
+    });
+    expect(fake.state.closed).toBe(true);
+  });
+
+  it("fails when observation returns no action", async () => {
+    const fake = createFakeAgent({ observe: async () => [] });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Agent tidak menemukan aksi untuk langkah ini.");
+    }
+    expect(fake.state.actCalls).toBe(0);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      action: "observe",
+      result: { status: "failed" },
+    });
+  });
+
+  it("maps a missing provider configuration to a stable reason", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_provider_not_configured");
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Provider model belum dikonfigurasi.");
+    }
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("fails when the step limit is reached before the goal", async () => {
+    const fake = createFakeAgent({
+      extractText: async () =>
+        JSON.stringify({
+          stepOk: true,
+          goalComplete: false,
+          reason: "Lanjut ke langkah berikutnya.",
+        }),
+    });
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+      maxSteps: 2,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Batas maksimal 2 langkah terlampaui.");
+    }
+    expect(harness.steps.list(task.id)).toHaveLength(2);
+    expect(harness.steps.list(task.id).every((step) => step.result.status === "done")).toBe(
+      true,
+    );
+  });
+
+  it("fails when the task deadline is reached", async () => {
+    vi.useFakeTimers();
+    try {
+      let announceObserve: () => void = () => undefined;
+      const observeStarted = new Promise<void>((resolve) => {
+        announceObserve = resolve;
+      });
+      const fake = createFakeAgent({
+        observe: async () => {
+          announceObserve();
+          return await new Promise<readonly AgentAction[]>(() => undefined);
+        },
+      });
+      const harness = createRunnerHarness({
+        createAgent: async () => fake.agent,
+        maxDurationMs: 100,
+      });
+      const task = createTask(harness.tasks);
+      const terminal = waitForTerminal(harness.events, task.id);
+
+      harness.runner.start(task.id);
+      await observeStarted;
+      await vi.advanceTimersByTimeAsync(100);
+      const event = await terminal;
+
+      expect(event.type).toBe("task.failed");
+      if (event.type === "task.failed") {
+        expect(event.reason).toBe("Batas waktu task terlampaui.");
+      }
+      expect(fake.state.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("runs tasks on the same session one at a time in FIFO order", async () => {
+    let releaseFirst: () => void = () => undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let announceFirst: () => void = () => undefined;
+    const firstObserveStarted = new Promise<void>((resolve) => {
+      announceFirst = resolve;
+    });
+    const created: ReturnType<typeof createFakeAgent>[] = [];
+
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        const fake =
+          created.length === 0
+            ? createFakeAgent({
+                observe: async () => {
+                  announceFirst();
+                  await firstGate;
+                  return [defaultAction];
+                },
+              })
+            : createFakeAgent();
+        created.push(fake);
+        return fake.agent;
+      },
+    });
+    const firstTask = createTask(harness.tasks);
+    const secondTask = createTask(harness.tasks);
+    const firstTerminal = waitForTerminal(harness.events, firstTask.id);
+    const secondTerminal = waitForTerminal(harness.events, secondTask.id);
+
+    harness.runner.start(firstTask.id);
+    await withDeadline(firstObserveStarted);
+    harness.runner.start(secondTask.id);
+
+    expect(created).toHaveLength(1);
+    expect(harness.tasks.getTask(secondTask.id)?.status).toBe("queued");
+
+    releaseFirst();
+    await withDeadline(Promise.all([firstTerminal, secondTerminal]));
+
+    expect(created).toHaveLength(2);
+    expect(harness.tasks.getTask(firstTask.id)?.status).toBe("completed");
+    expect(harness.tasks.getTask(secondTask.id)?.status).toBe("completed");
+    expect(harness.steps.list(firstTask.id)).toHaveLength(1);
+    expect(harness.steps.list(secondTask.id)).toHaveLength(1);
+  });
+
+  it("never runs a task cancelled while queued", async () => {
+    let releaseFirst: () => void = () => undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let announceFirst: () => void = () => undefined;
+    const firstObserveStarted = new Promise<void>((resolve) => {
+      announceFirst = resolve;
+    });
+    const created: ReturnType<typeof createFakeAgent>[] = [];
+
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        const fake =
+          created.length === 0
+            ? createFakeAgent({
+                observe: async () => {
+                  announceFirst();
+                  await firstGate;
+                  return [defaultAction];
+                },
+              })
+            : createFakeAgent();
+        created.push(fake);
+        return fake.agent;
+      },
+    });
+    const firstTask = createTask(harness.tasks);
+    const secondTask = createTask(harness.tasks);
+    const firstTerminal = waitForTerminal(harness.events, firstTask.id);
+    const secondTerminal = waitForTerminal(harness.events, secondTask.id);
+
+    harness.runner.start(firstTask.id);
+    await withDeadline(firstObserveStarted);
+    harness.runner.start(secondTask.id);
+    harness.tasks.cancelTask(secondTask.id);
+    harness.runner.cancel(secondTask.id);
+
+    await withDeadline(secondTerminal);
+    releaseFirst();
+    await withDeadline(firstTerminal);
+
+    expect(created).toHaveLength(1);
+    expect(harness.tasks.getTask(secondTask.id)?.status).toBe("cancelled");
+    expect(harness.steps.list(secondTask.id)).toHaveLength(0);
+  });
+
+  it("uses one screenshot fallback per step when snapshots fail", async () => {
+    const fake = createFakeAgent({
+      snapshot: async () => {
+        throw new AgentError("agent_snapshot_failed", "snapshot");
+      },
+      extractText: async (_instruction, options) => {
+        if (options?.screenshot === true) {
+          return "Ringkasan halaman.";
+        }
+        return JSON.stringify({
+          stepOk: true,
+          goalComplete: true,
+          reason: "Selesai.",
+        });
+      },
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(fake.state.screenshotCalls).toBe(1);
+    expect(fake.state.extractCalls).toBe(2);
+    expect(harness.steps.last(task.id)?.result.pageChanged).toBe(false);
+  });
+
+  it("fails when the session ends between steps", async () => {
+    const sessions = createFakeSessions();
+    const fake = createFakeAgent({
+      extractText: async () => {
+        sessions.setReady(false);
+        return JSON.stringify({
+          stepOk: true,
+          goalComplete: false,
+          reason: "Lanjut.",
+        });
+      },
+    });
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Sesi berakhir saat task berjalan.");
+    }
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+    expect(harness.steps.last(task.id)?.result.status).toBe("done");
+    expect(fake.state.closed).toBe(true);
+  });
+
+  it("fails with a session-ended reason when the session closes during a call", async () => {
+    const sessions = createFakeSessions();
+    const fake = createFakeAgent({
+      observe: async () => {
+        sessions.setReady(false);
+        throw new AgentError("agent_observe_failed", "observe");
+      },
+    });
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Sesi berakhir saat task berjalan.");
+    }
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+    expect(harness.steps.last(task.id)?.result.status).toBe("failed");
+    expect(fake.state.closed).toBe(true);
+  });
+
+  it("stops an HTTP cancel in under two seconds without completing the task", async () => {
+    let announceObserve: () => void = () => undefined;
+    const observeStarted = new Promise<void>((resolve) => {
+      announceObserve = resolve;
+    });
+    let announceClose: () => void = () => undefined;
+    const closed = new Promise<void>((resolve) => {
+      announceClose = resolve;
+    });
+    const fake = createFakeAgent({
+      observe: async () => {
+        announceObserve();
+        return await new Promise<readonly AgentAction[]>(() => undefined);
+      },
+      close: async () => {
+        announceClose();
+      },
+    });
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+      shutdownTimeoutMs: 500,
+    });
+    const app = createAppHarness(
+      harness.runner,
+      harness.tasks,
+      harness.sessions,
+      harness.events,
+    );
+
+    const created = await app.request(`/v1/sessions/${readySessionId}/tasks`, {
+      method: "POST",
+      headers: {
+        Authorization: authorization,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "http-cancel-key",
+      },
+      body: JSON.stringify({ goal: "Buka halaman kontak" }),
+    });
+    expect(created.status).toBe(202);
+    const createdBody = (await created.json()) as { data: Task };
+
+    await withDeadline(observeStarted);
+
+    const cancelStartedAt = Date.now();
+    const cancelled = await app.request(`/v1/tasks/${createdBody.data.id}/cancel`, {
+      method: "POST",
+      headers: { Authorization: authorization },
+    });
+    expect(cancelled.status).toBe(202);
+    const cancelledBody = (await cancelled.json()) as { data: Task };
+    expect(cancelledBody.data.status).toBe("cancelled");
+
+    await withDeadline(closed, 2_000);
+    const elapsedMs = Date.now() - cancelStartedAt;
+    console.info(`HTTP cancel closed the loop in ${elapsedMs} ms.`);
+
+    expect(elapsedMs).toBeLessThan(2_000);
+    expect(harness.tasks.getTask(createdBody.data.id)?.status).toBe("cancelled");
+    expect(harness.steps.list(createdBody.data.id)).toHaveLength(0);
+    expect(
+      harness.events.list().some(({ event }) => event.type === "task.completed"),
+    ).toBe(false);
+  });
+
+  it("cancels active tasks and closes agents on shutdown", async () => {
+    let announceObserve: () => void = () => undefined;
+    const observeStarted = new Promise<void>((resolve) => {
+      announceObserve = resolve;
+    });
+    const fake = createFakeAgent({
+      observe: async () => {
+        announceObserve();
+        return await new Promise<readonly AgentAction[]>(() => undefined);
+      },
+    });
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+      shutdownTimeoutMs: 500,
+    });
+    const task = createTask(harness.tasks);
+
+    harness.runner.start(task.id);
+    await withDeadline(observeStarted);
+
+    const startedAt = Date.now();
+    await harness.runner.shutdown();
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(5_000);
+    expect(harness.tasks.getTask(task.id)?.status).toBe("cancelled");
+    expect(fake.state.closed).toBe(true);
+    expect(
+      harness.events.list().some(({ event }) => event.type === "task.completed"),
+    ).toBe(false);
+
+    await harness.runner.shutdown();
+    expect(fake.state.closeCount).toBe(1);
+  });
+});

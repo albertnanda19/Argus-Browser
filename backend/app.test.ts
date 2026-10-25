@@ -177,6 +177,10 @@ function createHarness(
     profiles: overrides.profiles ?? profiles.service,
     sessions: overrides.sessions ?? sessions.service,
     tasks,
+    runner: {
+      start: () => undefined,
+      cancel: () => undefined,
+    },
     actions: {
       execute: async () => {
         throw new Error("Unused action execution.");
