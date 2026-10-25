@@ -20,6 +20,7 @@ import {
 } from "../shared/api";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
 import { healthResponseSchema } from "../shared/contracts";
+import { createOpenApiDocument } from "../shared/openapi";
 import { profileIdSchema, type Profile } from "../shared/profile";
 import { sessionIdSchema, type Session } from "../shared/session";
 import { taskIdSchema } from "../shared/task";
@@ -135,6 +136,7 @@ function paginate<T>(items: readonly T[], page: number, pageSize: number) {
 
 export function createApp(options: AppOptions): Hono {
   const app = new Hono();
+  const openApiDocument = createOpenApiDocument();
   const profileLock = createProfileLock();
   const eventStream = createEventStream({
     events: options.events,
@@ -181,6 +183,8 @@ export function createApp(options: AppOptions): Hono {
     });
     return c.json(body, 200);
   });
+
+  app.get("/v1/openapi.json", (c) => c.json(openApiDocument, 200));
 
   app.get("/v1/browser", (c) => {
     const body = browserStateResponseSchema.parse({
