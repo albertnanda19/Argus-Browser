@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { ApiInfo } from "../shared/contracts";
+import type { SidecarState } from "../shared/contracts";
 
 contextBridge.exposeInMainWorld("argus", {
-  getApiInfo: (): Promise<ApiInfo | null> => ipcRenderer.invoke("api:get-info"),
+  getSidecarState: (): Promise<SidecarState> => ipcRenderer.invoke("api:get-state"),
+  restartSidecar: (): Promise<void> => ipcRenderer.invoke("api:restart"),
 });

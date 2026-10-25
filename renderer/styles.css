@@ -56,6 +56,26 @@ body {
   background-color: #facc15;
 }
 
+.restart {
+  margin-top: 0.5rem;
+  padding: 0.6rem 1.1rem;
+  border: 1px solid #475569;
+  border-radius: 0.5rem;
+  background-color: #1e293b;
+  color: #e2e8f0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.restart:hover {
+  background-color: #334155;
+}
+
+.restart:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
 .status[data-status="connected"] .dot {
   background-color: #22c55e;
 }

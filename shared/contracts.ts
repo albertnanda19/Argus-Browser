@@ -14,6 +14,14 @@ export const apiInfoSchema = z.strictObject({
 
 export type ApiInfo = z.infer<typeof apiInfoSchema>;
 
+export const sidecarStateSchema = z.discriminatedUnion("status", [
+  z.strictObject({ status: z.literal("starting") }),
+  z.strictObject({ status: z.literal("connected"), apiInfo: apiInfoSchema }),
+  z.strictObject({ status: z.literal("error") }),
+]);
+
+export type SidecarState = z.infer<typeof sidecarStateSchema>;
+
 export const healthResponseSchema = z.strictObject({
   data: z.strictObject({
     ok: z.literal(true),

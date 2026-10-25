@@ -1,9 +1,10 @@
-import type { ApiInfo } from "../shared/contracts";
+import type { SidecarState } from "../shared/contracts";
 
 declare global {
   interface Window {
     argus: {
-      getApiInfo: () => Promise<ApiInfo | null>;
+      getSidecarState: () => Promise<SidecarState>;
+      restartSidecar: () => Promise<void>;
     };
   }
 }
