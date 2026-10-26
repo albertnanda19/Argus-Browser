@@ -13,8 +13,17 @@ const SNAPSHOT_TIMEOUT_MS = 20_000;
 const OPERATION_TIMEOUT_MS = 60_000;
 const REPLAY_TIMEOUT_MS = 10_000;
 const CLOSE_TIMEOUT_MS = 5_000;
+const PAGE_PROBE_TIMEOUT_MS = 3_000;
+const PAGE_RELOAD_TIMEOUT_MS = 30_000;
+const PAGE_PREPARE_TIMEOUT_MS = 40_000;
 
-export type AgentOperation = "init" | "snapshot" | "observe" | "act" | "extract";
+export type AgentOperation =
+  | "init"
+  | "snapshot"
+  | "observe"
+  | "act"
+  | "extract"
+  | "prepare";
 
 export type AgentErrorCode =
   | "agent_provider_not_configured"
@@ -26,7 +35,8 @@ export type AgentErrorCode =
   | "agent_snapshot_failed"
   | "agent_observe_failed"
   | "agent_act_failed"
-  | "agent_extract_failed";
+  | "agent_extract_failed"
+  | "agent_page_not_ready";
 
 const AGENT_ERROR_MESSAGES: Record<AgentErrorCode, string> = {
   agent_provider_not_configured: "Agent provider is not configured.",
@@ -39,17 +49,24 @@ const AGENT_ERROR_MESSAGES: Record<AgentErrorCode, string> = {
   agent_observe_failed: "Agent observe failed.",
   agent_act_failed: "Agent act failed.",
   agent_extract_failed: "Agent extract failed.",
+  agent_page_not_ready: "Agent page is not ready.",
 };
 
 export class AgentError extends Error {
   readonly code: AgentErrorCode;
   readonly operation: AgentOperation | null;
+  readonly reloaded: boolean;
 
-  constructor(code: AgentErrorCode, operation: AgentOperation | null = null) {
+  constructor(
+    code: AgentErrorCode,
+    operation: AgentOperation | null = null,
+    reloaded = false,
+  ) {
     super(AGENT_ERROR_MESSAGES[code]);
     this.name = "AgentError";
     this.code = code;
     this.operation = operation;
+    this.reloaded = reloaded;
   }
 }
 
@@ -63,6 +80,7 @@ export type StagehandAgent = {
     instruction: string,
     options?: { readonly screenshot?: boolean },
   ): Promise<unknown>;
+  preparePage(): Promise<{ readonly reloaded: boolean }>;
   close(): Promise<void>;
 };
 
@@ -171,6 +189,38 @@ class StagehandAgentImpl implements StagehandAgent {
       );
     } catch (error) {
       throw this.mapFailure(error, "extract", "agent_extract_failed");
+    }
+  }
+
+  async preparePage(): Promise<{ readonly reloaded: boolean }> {
+    this.ensureOpen();
+
+    try {
+      const preparation = await withTimeout(
+        runOperation(() =>
+          this.runtime.preparePage({
+            probeTimeoutMs: PAGE_PROBE_TIMEOUT_MS,
+            reloadTimeoutMs: PAGE_RELOAD_TIMEOUT_MS,
+          }),
+        ),
+        PAGE_PREPARE_TIMEOUT_MS,
+      );
+
+      if (!preparation.ready) {
+        throw new AgentError(
+          "agent_page_not_ready",
+          "prepare",
+          preparation.reloaded,
+        );
+      }
+
+      return { reloaded: preparation.reloaded };
+    } catch (error) {
+      if (error instanceof AgentError) {
+        throw error;
+      }
+
+      throw new AgentError("agent_page_not_ready", "prepare");
     }
   }
 

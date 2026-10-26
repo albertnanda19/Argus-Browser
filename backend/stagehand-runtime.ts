@@ -21,11 +21,22 @@ export type StagehandExtractOptions = {
   readonly screenshot: boolean;
 };
 
+export type StagehandPagePrepareOptions = {
+  readonly probeTimeoutMs: number;
+  readonly reloadTimeoutMs: number;
+};
+
+export type StagehandPagePreparation = {
+  readonly ready: boolean;
+  readonly reloaded: boolean;
+};
+
 export type StagehandRuntime = {
   snapshot(timeoutMs: number): Promise<string>;
   observe(instruction: string, timeoutMs: number): Promise<readonly AgentAction[]>;
   act(input: string | AgentAction, timeoutMs: number): Promise<AgentActSummary>;
   extract(instruction: string, options: StagehandExtractOptions): Promise<unknown>;
+  preparePage(options: StagehandPagePrepareOptions): Promise<StagehandPagePreparation>;
   close(): Promise<void>;
 };
 
@@ -56,6 +67,93 @@ function toRawAction(action: AgentAction) {
     ...(action.method === undefined ? {} : { method: action.method }),
     ...(action.arguments === undefined ? {} : { arguments: [...action.arguments] }),
   };
+}
+
+export type LocatorWorldPage = {
+  readonly locator: (selector: string) => {
+    readonly count: (options: { readonly timeout: number }) => Promise<number>;
+  };
+  readonly reload: (options: {
+    readonly waitUntil: "domcontentloaded";
+    readonly timeout: number;
+  }) => Promise<unknown>;
+};
+
+function withPreparationTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => {
+      rejectPromise(new Error("Page preparation step timed out."));
+    }, timeoutMs);
+    timer.unref?.();
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolvePromise(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        rejectPromise(error);
+      },
+    );
+  });
+}
+
+export async function probeLocatorWorld(
+  page: LocatorWorldPage,
+  timeoutMs: number,
+): Promise<boolean> {
+  try {
+    await withPreparationTimeout(
+      page.locator("body").count({ timeout: timeoutMs }),
+      timeoutMs,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function prepareStagehandPage(
+  page: LocatorWorldPage,
+  options: StagehandPagePrepareOptions,
+): Promise<StagehandPagePreparation> {
+  if (await probeLocatorWorld(page, options.probeTimeoutMs)) {
+    return { ready: true, reloaded: false };
+  }
+
+  try {
+    await withPreparationTimeout(
+      page.reload({
+        waitUntil: "domcontentloaded",
+        timeout: options.reloadTimeoutMs,
+      }),
+      options.reloadTimeoutMs,
+    );
+  } catch {
+    return { ready: false, reloaded: true };
+  }
+
+  return {
+    ready: await probeLocatorWorld(page, options.probeTimeoutMs),
+    reloaded: true,
+  };
+}
+
+export function unwrapExtractionResult(data: unknown): unknown {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return data;
+  }
+
+  const keys = Object.keys(data);
+  if (keys.length !== 1 || keys[0] !== "extraction" || !("extraction" in data)) {
+    return data;
+  }
+
+  return typeof data.extraction === "string" ? data.extraction : data;
 }
 
 function toStagehandModelName(value: string): `google/${string}` {
@@ -112,7 +210,11 @@ export const createStagehandRuntime: StagehandRuntimeFactory = async (options) =
         timeout: extractOptions.timeoutMs,
         ...(extractOptions.screenshot ? { screenshot: true } : {}),
       });
-      return result.data;
+      return unwrapExtractionResult(result.data);
+    },
+    async preparePage(prepareOptions) {
+      const page = await resolvePage();
+      return await prepareStagehandPage(page, prepareOptions);
     },
     async close() {
       await stagehand.close();

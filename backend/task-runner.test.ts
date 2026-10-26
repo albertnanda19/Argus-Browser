@@ -70,6 +70,7 @@ const registry: ProviderRegistry = {
 type FakeAgentState = {
   closed: boolean;
   closeCount: number;
+  prepareCalls: number;
   observeCalls: number;
   actCalls: number;
   extractCalls: number;
@@ -80,6 +81,7 @@ type FakeAgentState = {
 
 type FakeAgentHooks = {
   readonly snapshot?: () => Promise<{ readonly formattedTree: string }>;
+  readonly preparePage?: () => Promise<{ readonly reloaded: boolean }>;
   readonly observe?: (instruction: string) => Promise<readonly AgentAction[]>;
   readonly act?: (input: string | AgentAction) => Promise<AgentActSummary>;
   readonly extractText?: (
@@ -93,6 +95,7 @@ function createFakeAgent(hooks: FakeAgentHooks = {}) {
   const state: FakeAgentState = {
     closed: false,
     closeCount: 0,
+    prepareCalls: 0,
     observeCalls: 0,
     actCalls: 0,
     extractCalls: 0,
@@ -109,6 +112,12 @@ function createFakeAgent(hooks: FakeAgentHooks = {}) {
         snapshotCount += 1;
         return { formattedTree: `tree-${snapshotCount}` };
       }),
+    preparePage: async () => {
+      state.prepareCalls += 1;
+      return hooks.preparePage === undefined
+        ? { reloaded: false }
+        : hooks.preparePage();
+    },
     observe: async (instruction) => {
       state.observeCalls += 1;
       state.observeInstructions.push(instruction);
@@ -496,6 +505,53 @@ describe("task runner", () => {
 
   it("fails readably when verification JSON is not valid", async () => {
     const fake = createFakeAgent({ extractText: async () => "bukan json" });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Verifikasi tidak dapat dibaca.");
+    }
+    expect(harness.steps.last(task.id)).toMatchObject({
+      result: { status: "failed", verification: null },
+    });
+  });
+
+  it("accepts the default extract envelope", async () => {
+    const fake = createFakeAgent({
+      extractText: async () => ({
+        extraction: JSON.stringify({
+          stepOk: true,
+          goalComplete: true,
+          reason: "Tujuan tercapai.",
+        }),
+      }),
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    if (event.type === "task.completed") {
+      expect(event.result).toEqual({ summary: "Tujuan tercapai.", steps: 1 });
+    }
+  });
+
+  it.each([
+    ["broken inner JSON", { extraction: "bukan json" }],
+    [
+      "missing verification key",
+      { extraction: JSON.stringify({ stepOk: true, goalComplete: true }) },
+    ],
+  ])("fails readably when the extract envelope has %s", async (_label, envelope) => {
+    const fake = createFakeAgent({ extractText: async () => envelope });
     const harness = createRunnerHarness({ createAgent: async () => fake.agent });
     const task = createTask(harness.tasks);
     const terminal = waitForTerminal(harness.events, task.id);
@@ -952,7 +1008,7 @@ describe("task runner", () => {
 describe("task runner pre-navigation", () => {
   const goalUrl = "https://contoh.test/halaman";
 
-  it("navigates to the first goal URL before creating the agent", async () => {
+  it("creates the agent before navigating to the first goal URL", async () => {
     const sessions = createFakeSessions({ initialUrl: "about:blank" });
     let gotoCallsAtAgentCreation = -1;
     let observedUrl = "";
@@ -981,7 +1037,7 @@ describe("task runner pre-navigation", () => {
       expect(event.result).toEqual({ summary: "Tujuan tercapai.", steps: 2 });
     }
     expect(sessions.gotoCalls).toEqual([{ url: goalUrl, timeout: 30_000 }]);
-    expect(gotoCallsAtAgentCreation).toBe(1);
+    expect(gotoCallsAtAgentCreation).toBe(0);
     expect(observedUrl).toBe(goalUrl);
 
     const recorded = harness.steps.list(task.id);
@@ -1073,12 +1129,13 @@ describe("task runner pre-navigation", () => {
         "Halaman awal kosong dan tujuan tidak menyebut URL.",
       );
     }
-    expect(isAgentCreated).toBe(false);
+    expect(isAgentCreated).toBe(true);
+    expect(fake.state.closed).toBe(true);
     expect(sessions.gotoCalls).toHaveLength(0);
     expect(harness.steps.list(task.id)).toHaveLength(0);
   });
 
-  it("records a failed navigation step without creating an agent", async () => {
+  it("records a failed navigation step and closes the created agent", async () => {
     const sessions = createFakeSessions({
       initialUrl: "about:blank",
       goto: async () => {
@@ -1106,7 +1163,8 @@ describe("task runner pre-navigation", () => {
         "Halaman tidak dapat dibuka dari URL pada tujuan task.",
       );
     }
-    expect(isAgentCreated).toBe(false);
+    expect(isAgentCreated).toBe(true);
+    expect(fake.state.closed).toBe(true);
     expect(sessions.gotoCalls).toEqual([{ url: goalUrl, timeout: 30_000 }]);
 
     const recorded = harness.steps.list(task.id);
@@ -1189,6 +1247,116 @@ describe("task runner pre-navigation", () => {
       index: 1,
       action: "act",
     });
+  });
+});
+
+describe("task runner page preparation", () => {
+  it("records a done reload step before the first agent step", async () => {
+    const fake = createFakeAgent({
+      preparePage: async () => ({ reloaded: true }),
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    if (event.type === "task.completed") {
+      expect(event.result).toEqual({ summary: "Tujuan tercapai.", steps: 2 });
+    }
+    expect(fake.state.prepareCalls).toBe(1);
+
+    const recorded = harness.steps.list(task.id);
+    expect(recorded).toHaveLength(2);
+    expect(recorded[0]).toMatchObject({
+      index: 1,
+      action: "reload",
+      target: "Muat ulang halaman",
+      result: {
+        status: "done",
+        url: pageUrl,
+        pageChanged: true,
+        verification: {
+          stepOk: true,
+          goalComplete: false,
+          reason: "Halaman dimuat ulang agar agent siap.",
+        },
+      },
+    });
+    expect(recorded[1]).toMatchObject({ index: 2, action: "act" });
+    expect(fake.state.closed).toBe(true);
+  });
+
+  it("does not record a reload step when the page is ready", async () => {
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(fake.state.prepareCalls).toBe(1);
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      index: 1,
+      action: "act",
+    });
+  });
+
+  it("fails and records a failed reload step when the page stays unready", async () => {
+    const fake = createFakeAgent({
+      preparePage: async () => {
+        throw new AgentError("agent_page_not_ready", "prepare", true);
+      },
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Halaman belum siap untuk agent setelah dimuat ulang.",
+      );
+    }
+    expect(fake.state.observeCalls).toBe(0);
+    expect(fake.state.closed).toBe(true);
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      index: 1,
+      action: "reload",
+      target: "Muat ulang halaman",
+      result: {
+        status: "failed",
+        pageChanged: true,
+        verification: null,
+      },
+    });
+  });
+
+  it("does not record a reload step when preparation fails before a reload", async () => {
+    const fake = createFakeAgent({
+      preparePage: async () => {
+        throw new AgentError("agent_page_not_ready", "prepare");
+      },
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    expect(fake.state.observeCalls).toBe(0);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
   });
 });
 

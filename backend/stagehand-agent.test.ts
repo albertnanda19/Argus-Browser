@@ -75,6 +75,9 @@ function createRuntime(overrides: Partial<StagehandRuntime> = {}): StagehandRunt
     async extract() {
       return { extraction: "text" };
     },
+    async preparePage() {
+      return { ready: true, reloaded: false };
+    },
     async close() {
       return undefined;
     },
@@ -620,6 +623,114 @@ describe("extractText", () => {
     });
 
     await vi.advanceTimersByTimeAsync(59_999);
+    let isSettled = false;
+    void pending.then(
+      () => {
+        isSettled = true;
+      },
+      () => {
+        isSettled = true;
+      },
+    );
+    expect(isSettled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+  });
+});
+
+describe("preparePage", () => {
+  it("does not reload a page whose locator world is ready", async () => {
+    const calls: Array<{ readonly probeTimeoutMs: number; readonly reloadTimeoutMs: number }> = [];
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async preparePage(options) {
+          calls.push(options);
+          return { ready: true, reloaded: false };
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.preparePage()).resolves.toEqual({ reloaded: false });
+    expect(calls).toEqual([{ probeTimeoutMs: 3_000, reloadTimeoutMs: 30_000 }]);
+
+    await agent.close();
+  });
+
+  it("reports the single reload that warmed the page", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async preparePage() {
+          return { ready: true, reloaded: true };
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.preparePage()).resolves.toEqual({ reloaded: true });
+
+    await agent.close();
+  });
+
+  it("fails with agent_page_not_ready after two failed probes", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async preparePage() {
+          return { ready: false, reloaded: true };
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.preparePage()).rejects.toMatchObject({
+      name: "AgentError",
+      code: "agent_page_not_ready",
+      operation: "prepare",
+      reloaded: true,
+      message: "Agent page is not ready.",
+    });
+
+    await agent.close();
+  });
+
+  it("does not leak the key or page content when preparation fails", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async preparePage() {
+          throw new Error(
+            `prepare failed with ${FAKE_API_KEY} and <html>isi halaman rahasia</html>`,
+          );
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.preparePage().catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({ code: "agent_page_not_ready" });
+    expect(String(error)).not.toContain(FAKE_API_KEY);
+    expect(String(error)).not.toContain("isi halaman rahasia");
+
+    await agent.close();
+  });
+
+  it("stops waiting after forty seconds", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        preparePage: () => new Promise(() => undefined),
+      }),
+    });
+    const agent = await fixture.createAgent();
+    vi.useFakeTimers();
+
+    const pending = agent.preparePage();
+    const assertion = expect(pending).rejects.toMatchObject({
+      code: "agent_page_not_ready",
+      operation: "prepare",
+    });
+
+    await vi.advanceTimersByTimeAsync(39_999);
     let isSettled = false;
     void pending.then(
       () => {
