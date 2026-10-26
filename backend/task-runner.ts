@@ -211,27 +211,299 @@ function isExtractionEnvelope(
   );
 }
 
-function parseVerification(raw: unknown): AgentStepVerification | null {
-  let value = raw;
+type FenceBlock = {
+  readonly start: number;
+  readonly end: number;
+  readonly content: string;
+};
 
-  if (typeof raw === "string") {
-    try {
-      value = JSON.parse(raw);
-    } catch {
-      return null;
+type BalancedObject = {
+  readonly start: number;
+  readonly end: number;
+  readonly text: string;
+};
+
+type VerificationDiagnostics = {
+  readonly rawType: string;
+  readonly length: number;
+  readonly hasFence: boolean;
+  readonly hasOutsideText: boolean;
+  readonly firstCharClass: string;
+  readonly objectCandidates: number;
+  readonly errorName: string;
+};
+
+type VerificationParseResult = {
+  readonly verification: AgentStepVerification | null;
+  readonly diagnostics: VerificationDiagnostics;
+};
+
+type StringParseResult = {
+  readonly verification: AgentStepVerification | null;
+  readonly errorName: string;
+  readonly fence: FenceBlock | null;
+  readonly objects: readonly BalancedObject[];
+};
+
+type JsonCandidate =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly errorName: string };
+
+function findFenceBlock(text: string): FenceBlock | null {
+  const opening = /(^|\n)[ \t]*```[^\n]*\n/.exec(text);
+  if (opening === null) {
+    return null;
+  }
+
+  const contentStart = opening.index + opening[0].length;
+  const closing = /\n[ \t]*```[ \t]*/g;
+  closing.lastIndex = contentStart;
+  const closingMatch = closing.exec(text);
+  if (closingMatch === null) {
+    return null;
+  }
+
+  return {
+    start: opening.index,
+    end: closingMatch.index + closingMatch[0].length,
+    content: text.slice(contentStart, closingMatch.index),
+  };
+}
+
+function findObjectEnd(text: string, start: number): number | null {
+  let depth = 0;
+  let isInString = false;
+  let isEscaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const character = text.charAt(index);
+
+    if (isInString) {
+      if (isEscaped) {
+        isEscaped = false;
+      } else if (character === "\\") {
+        isEscaped = true;
+      } else if (character === '"') {
+        isInString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      isInString = true;
+    } else if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
     }
   }
 
+  return null;
+}
+
+function findBalancedObjects(text: string): BalancedObject[] {
+  const objects: BalancedObject[] = [];
+  let index = 0;
+
+  while (index < text.length) {
+    const start = text.indexOf("{", index);
+    if (start === -1) {
+      break;
+    }
+
+    const end = findObjectEnd(text, start);
+    if (end === null) {
+      index = start + 1;
+      continue;
+    }
+
+    objects.push({
+      start,
+      end: end + 1,
+      text: text.slice(start, end + 1),
+    });
+    index = end + 1;
+  }
+
+  return objects;
+}
+
+function parseJsonCandidate(text: string): JsonCandidate {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch (error) {
+    return {
+      ok: false,
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    };
+  }
+}
+
+function parseVerificationString(text: string): StringParseResult {
+  const trimmed = text.trim();
+  const fence = findFenceBlock(trimmed);
+  const objects = findBalancedObjects(trimmed);
+
+  if (trimmed.length === 0) {
+    return { verification: null, errorName: "EmptyInput", fence, objects };
+  }
+
+  const candidates: string[] = [trimmed];
+  if (fence !== null) {
+    const content = fence.content.trim();
+    if (content.length > 0) {
+      candidates.push(content);
+    }
+  }
+  for (const object of objects) {
+    candidates.push(object.text);
+  }
+
+  let errorName = "NoObjectCandidate";
+
+  for (const candidate of new Set(candidates)) {
+    const parsed = parseJsonCandidate(candidate);
+    if (!parsed.ok) {
+      errorName = parsed.errorName;
+      continue;
+    }
+
+    const verification = verificationSchema.safeParse(parsed.value);
+    if (verification.success) {
+      return {
+        verification: verification.data,
+        errorName: "None",
+        fence,
+        objects,
+      };
+    }
+
+    errorName = "ZodError";
+  }
+
+  return { verification: null, errorName, fence, objects };
+}
+
+function describeRawType(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+  if (Array.isArray(value)) {
+    return "array";
+  }
+  return typeof value;
+}
+
+function measureRawLength(value: unknown): number {
+  if (typeof value === "string") {
+    return value.length;
+  }
   if (isExtractionEnvelope(value)) {
-    try {
-      value = JSON.parse(value.extraction);
-    } catch {
-      return null;
-    }
+    return value.extraction.length;
+  }
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+function classifyFirstChar(text: string): string {
+  const first = text.trimStart().charAt(0);
+  if (first.length === 0) {
+    return "empty";
+  }
+  if (first === "{") {
+    return "brace";
+  }
+  if (first === "[") {
+    return "bracket";
+  }
+  if (first === "`") {
+    return "backtick";
+  }
+  if (first === '"') {
+    return "quote";
+  }
+  if (/[A-Za-z]/.test(first)) {
+    return "letter";
+  }
+  if (/[0-9]/.test(first)) {
+    return "digit";
+  }
+  return "other";
+}
+
+function hasTextOutsideObject(
+  text: string,
+  fence: FenceBlock | null,
+  objects: readonly BalancedObject[],
+): boolean {
+  if (fence !== null) {
+    const outside = `${text.slice(0, fence.start)}${text.slice(fence.end)}`;
+    return outside.trim().length > 0;
   }
 
-  const parsed = verificationSchema.safeParse(value);
-  return parsed.success ? parsed.data : null;
+  const first = objects[0];
+  if (first === undefined) {
+    return text.trim().length > 0;
+  }
+
+  const outside = `${text.slice(0, first.start)}${text.slice(first.end)}`;
+  return outside.trim().length > 0;
+}
+
+function parseVerificationWithDiagnostics(
+  raw: unknown,
+): VerificationParseResult {
+  let text: string | null = null;
+  if (typeof raw === "string") {
+    text = raw;
+  } else if (isExtractionEnvelope(raw)) {
+    text = raw.extraction;
+  }
+
+  let verification: AgentStepVerification | null = null;
+  let errorName = "ZodError";
+  let fence: FenceBlock | null = null;
+  let objects: readonly BalancedObject[] = [];
+
+  if (text === null) {
+    const parsed = verificationSchema.safeParse(raw);
+    if (parsed.success) {
+      verification = parsed.data;
+      errorName = "None";
+    }
+  } else {
+    const result = parseVerificationString(text);
+    verification = result.verification;
+    errorName = result.errorName;
+    fence = result.fence;
+    objects = result.objects;
+  }
+
+  return {
+    verification,
+    diagnostics: {
+      rawType: describeRawType(raw),
+      length: measureRawLength(raw),
+      hasFence: text !== null && text.includes("```"),
+      hasOutsideText:
+        text !== null && hasTextOutsideObject(text, fence, objects),
+      firstCharClass: text === null ? "none" : classifyFirstChar(text),
+      objectCandidates: objects.length,
+      errorName,
+    },
+  };
+}
+
+export function parseVerification(
+  raw: unknown,
+): AgentStepVerification | null {
+  return parseVerificationWithDiagnostics(raw).verification;
 }
 
 function reasonForAgentError(error: unknown): string {
@@ -295,7 +567,7 @@ function buildObserveInstruction(
   ].join("\n");
 }
 
-function buildVerifyInstruction(
+export function buildVerifyInstruction(
   goal: string,
   target: string,
   url: string,
@@ -890,8 +1162,12 @@ class TaskRunnerImpl implements TaskRunner {
       return "failed";
     }
 
-    const verification = parseVerification(raw);
+    const parsed = parseVerificationWithDiagnostics(raw);
+    const verification = parsed.verification;
     if (verification === null) {
+      console.warn(
+        `Verification parse failed: task=${record.taskId} type=${parsed.diagnostics.rawType} length=${parsed.diagnostics.length} fence=${parsed.diagnostics.hasFence} outsideText=${parsed.diagnostics.hasOutsideText} firstChar=${parsed.diagnostics.firstCharClass} candidates=${parsed.diagnostics.objectCandidates} error=${parsed.diagnostics.errorName}`,
+      );
       this.recordStep({
         record,
         action: actionKind,

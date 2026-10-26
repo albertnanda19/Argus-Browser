@@ -21,6 +21,10 @@ import { createProviderRegistry } from "../provider-registry";
 import type { ProviderService } from "../provider-service";
 import type { StoredProviderConfig } from "../provider-store";
 import { createStagehandAgent, type StagehandAgent } from "../stagehand-agent";
+import {
+  buildVerifyInstruction,
+  parseVerification,
+} from "../task-runner";
 
 const execFileAsync = promisify(execFile);
 const PROCESS_TIMEOUT_MS = 10_000;
@@ -85,6 +89,37 @@ function describeError(error: unknown): string {
     return `${error.message} (cause: ${error.cause.message})`;
   }
   return error.message;
+}
+
+type RawVerificationShape = {
+  readonly hasFence: boolean;
+  readonly hasOutsideText: boolean;
+  readonly excerpt: string;
+};
+
+function describeVerificationShape(raw: string): RawVerificationShape {
+  const fence = /```[\s\S]*?```/.exec(raw);
+  let outside: string;
+
+  if (fence === null) {
+    const trimmed = raw.trim();
+    const start = trimmed.indexOf("{");
+    const end = trimmed.lastIndexOf("}");
+    outside =
+      start === -1 || end === -1
+        ? trimmed
+        : `${trimmed.slice(0, start)}${trimmed.slice(end + 1)}`;
+  } else {
+    outside = `${raw.slice(0, fence.index)}${raw.slice(
+      fence.index + fence[0].length,
+    )}`;
+  }
+
+  return {
+    hasFence: fence !== null,
+    hasOutsideText: outside.trim().length > 0,
+    excerpt: raw.replace(/\s+/g, " ").trim().slice(0, 200),
+  };
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -377,32 +412,39 @@ async function runSteps(state: SmokeState): Promise<void> {
   console.log(`act replay: PASS ${actMs} ms`);
   await assertCodeOutput(page, EXPECTED_CODE, "act result");
 
-  console.log("step 10: extract once and expect a JSON string, not an envelope");
-  const extraction = await agent.extractText(
-    'Balas hanya JSON: {"stepOk": true, "goalComplete": true, "reason": "kode tampil"}',
+  console.log("step 10: verify three times with the runner parser");
+  const verificationInstruction = buildVerifyInstruction(
+    "Tampilkan kode pada halaman uji Argus.",
+    action.description,
+    pageUrl,
+    true,
   );
-  if (typeof extraction !== "string") {
-    throw new Error(
-      `Extract returned ${Array.isArray(extraction) ? "an array" : typeof extraction}; expected a string.`,
+
+  for (let index = 1; index <= 3; index += 1) {
+    const raw = await agent.extractText(verificationInstruction);
+    if (typeof raw !== "string") {
+      throw new Error(
+        `Verification ${index} returned ${Array.isArray(raw) ? "an array" : typeof raw}; expected a string.`,
+      );
+    }
+
+    const shape = describeVerificationShape(raw);
+    const verification = parseVerification(raw);
+    console.log(
+      `verification ${index}: fence=${shape.hasFence} outsideText=${shape.hasOutsideText} length=${raw.length} excerpt="${shape.excerpt}" parsed=${verification !== null}${
+        verification === null
+          ? ""
+          : ` stepOk=${verification.stepOk} goalComplete=${verification.goalComplete} reasonLength=${verification.reason.length}`
+      }`,
     );
-  }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(extraction);
-  } catch {
-    throw new Error("Extract returned a string that is not valid JSON.");
+    if (verification === null) {
+      throw new Error(
+        `Verification ${index} could not be parsed from ${raw.length} characters.`,
+      );
+    }
   }
-
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("Extract JSON is not an object.");
-  }
-  if (!("stepOk" in parsed) || typeof parsed.stepOk !== "boolean") {
-    throw new Error("Extract JSON has no boolean stepOk field.");
-  }
-  console.log(
-    `extract: PASS (string, ${extraction.length} chars, JSON parsed)`,
-  );
+  console.log("verification: PASS (3 model calls parsed)");
 }
 
 async function cleanup(state: SmokeState): Promise<unknown> {

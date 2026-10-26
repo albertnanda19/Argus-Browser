@@ -5,7 +5,7 @@ import type { DomainEvent } from "../shared/event";
 import type { Session } from "../shared/session";
 import type { Task } from "../shared/task";
 import { createApp } from "./app";
-import { createAgentStepStore } from "./agent-steps";
+import { createAgentStepStore, type AgentStepVerification } from "./agent-steps";
 import type { BrowserPage, BrowserSessionContext } from "./browser-launcher";
 import { createEventBus, type EventBus } from "./event-bus";
 import { createEventStreamRegistry } from "./event-stream";
@@ -17,7 +17,12 @@ import {
 } from "./stagehand-agent";
 import type { AgentActSummary, AgentAction } from "./stagehand-runtime";
 import { createTaskManager, type TaskService } from "./task-manager";
-import { createTaskRunner, type TaskAgentFactory, type TaskRunner } from "./task-runner";
+import {
+  createTaskRunner,
+  parseVerification,
+  type TaskAgentFactory,
+  type TaskRunner,
+} from "./task-runner";
 import { isIrreversibleAction } from "./irreversible-actions";
 
 const token = "test-token";
@@ -381,6 +386,91 @@ const AGENT_STEP_KEYS = [
   "url",
 ];
 
+const acceptedVerification = {
+  stepOk: true,
+  goalComplete: false,
+  reason: "Tombol menampilkan kode.",
+};
+const acceptedVerificationJson = JSON.stringify(acceptedVerification);
+const escapedReasonVerification = {
+  stepOk: true,
+  goalComplete: false,
+  reason: 'Tombol "kode" menampilkan } dan {.',
+};
+
+const acceptedVerificationCases: Array<[string, unknown, AgentStepVerification]> = [
+  ["pure JSON", acceptedVerificationJson, acceptedVerification],
+  [
+    "JSON in a language-tagged fence",
+    `\`\`\`json\n${acceptedVerificationJson}\n\`\`\``,
+    acceptedVerification,
+  ],
+  [
+    "JSON in a bare fence with surrounding text",
+    `Berikut hasil verifikasi:\n\`\`\`\n${acceptedVerificationJson}\n\`\`\`\nSemoga membantu.`,
+    acceptedVerification,
+  ],
+  [
+    "an object inside prose",
+    `Hasil verifikasi: ${acceptedVerificationJson} Selesai.`,
+    acceptedVerification,
+  ],
+  [
+    "an envelope with fenced JSON",
+    { extraction: `\`\`\`json\n${acceptedVerificationJson}\n\`\`\`` },
+    acceptedVerification,
+  ],
+  [
+    "braces and escaped quotes in the reason",
+    JSON.stringify(escapedReasonVerification),
+    escapedReasonVerification,
+  ],
+  [
+    "braces and escaped quotes inside prose",
+    `Hasil verifikasi: ${JSON.stringify(escapedReasonVerification)} Selesai.`,
+    escapedReasonVerification,
+  ],
+];
+
+const rejectedVerificationCases: Array<[string, unknown]> = [
+  ["non-JSON text", "Saya tidak dapat memverifikasi halaman ini."],
+  [
+    "truncated JSON",
+    '{"stepOk": true, "goalComplete": false, "reason": "ok"',
+  ],
+  [
+    "an extra key",
+    JSON.stringify({ ...acceptedVerification, extra: true }),
+  ],
+  [
+    "a missing key",
+    JSON.stringify({ stepOk: true, goalComplete: false }),
+  ],
+  [
+    "a string boolean",
+    JSON.stringify({ ...acceptedVerification, stepOk: "true" }),
+  ],
+  [
+    "an empty reason",
+    JSON.stringify({ ...acceptedVerification, reason: "" }),
+  ],
+  [
+    "a reason over 4000 characters",
+    JSON.stringify({ ...acceptedVerification, reason: "x".repeat(4_001) }),
+  ],
+  ["a bare boolean string", "true"],
+];
+
+describe("parseVerification", () => {
+  it.each(acceptedVerificationCases)("accepts %s", (_label, raw, expected) => {
+    expect(parseVerification(raw)).toEqual(expected);
+  });
+
+  it.each(rejectedVerificationCases)("rejects %s", (_label, raw) => {
+    expect(parseVerification(raw)).toBeNull();
+  });
+});
+
 
 describe("isIrreversibleAction", () => {
   it.each([
@@ -519,6 +609,145 @@ describe("task runner", () => {
     expect(harness.steps.last(task.id)).toMatchObject({
       result: { status: "failed", verification: null },
     });
+  });
+
+  it.each([
+    [
+      "truncated JSON",
+      '{"stepOk": true, "goalComplete": false, "reason": "ok"',
+    ],
+    [
+      "an extra key",
+      JSON.stringify({
+        stepOk: true,
+        goalComplete: false,
+        reason: "ok",
+        extra: true,
+      }),
+    ],
+    [
+      "a missing key",
+      JSON.stringify({ stepOk: true, goalComplete: false }),
+    ],
+    [
+      "a wrong type",
+      JSON.stringify({
+        stepOk: "true",
+        goalComplete: false,
+        reason: "ok",
+      }),
+    ],
+  ])("fails readably when verification JSON has %s", async (_label, raw) => {
+    const fake = createFakeAgent({ extractText: async () => raw });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Verifikasi tidak dapat dibaca.");
+    }
+    expect(harness.steps.last(task.id)).toMatchObject({
+      result: { status: "failed", verification: null },
+    });
+  });
+
+  it("completes a task when the fake agent returns fenced verification JSON", async () => {
+    const fake = createFakeAgent({
+      extractText: async () =>
+        `\`\`\`json\n${JSON.stringify({
+          stepOk: true,
+          goalComplete: true,
+          reason: "Tujuan tercapai.",
+        })}\n\`\`\``,
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    if (event.type === "task.completed") {
+      expect(event.result).toEqual({ summary: "Tujuan tercapai.", steps: 1 });
+    }
+    expect(harness.steps.last(task.id)).toMatchObject({
+      result: {
+        status: "done",
+        verification: {
+          stepOk: true,
+          goalComplete: true,
+          reason: "Tujuan tercapai.",
+        },
+      },
+    });
+  });
+
+  it("warns with shape diagnostics and no raw content when verification fails", async () => {
+    const raw = "bukan json rahasia-halaman";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const fake = createFakeAgent({ extractText: async () => raw });
+      const harness = createRunnerHarness({
+        createAgent: async () => fake.agent,
+      });
+      const task = createTask(harness.tasks);
+      const terminal = waitForTerminal(harness.events, task.id);
+
+      harness.runner.start(task.id);
+      await withDeadline(terminal);
+
+      const line = warn.mock.calls
+        .map((call) => String(call[0]))
+        .find((value) => value.includes("Verification parse failed"));
+
+      expect(line).toBeDefined();
+      expect(line).toContain(`task=${task.id}`);
+      expect(line).toContain("type=string");
+      expect(line).toContain(`length=${raw.length}`);
+      expect(line).toContain("fence=false");
+      expect(line).toContain("outsideText=true");
+      expect(line).toContain("firstChar=letter");
+      expect(line).toContain("candidates=0");
+      expect(line).toContain("error=SyntaxError");
+      expect(line).not.toContain("rahasia-halaman");
+      expect(line).not.toContain("\n");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("warns with fence diagnostics when fenced verification fails schema validation", async () => {
+    const raw = '```json\n{"stepOk": true}\n```';
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const fake = createFakeAgent({ extractText: async () => raw });
+      const harness = createRunnerHarness({
+        createAgent: async () => fake.agent,
+      });
+      const task = createTask(harness.tasks);
+      const terminal = waitForTerminal(harness.events, task.id);
+
+      harness.runner.start(task.id);
+      await withDeadline(terminal);
+
+      const line = warn.mock.calls
+        .map((call) => String(call[0]))
+        .find((value) => value.includes("Verification parse failed"));
+
+      expect(line).toBeDefined();
+      expect(line).toContain("fence=true");
+      expect(line).toContain("outsideText=false");
+      expect(line).toContain("firstChar=backtick");
+      expect(line).toContain("candidates=1");
+      expect(line).toContain("error=ZodError");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("accepts the default extract envelope", async () => {
