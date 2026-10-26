@@ -14,7 +14,8 @@
     "test": "vitest run",
     "smoke:browser": "npm run build:node && node dist/node/backend/scripts/smoke-browser.js",
     "smoke:attach": "npm run build:node && node dist/node/backend/scripts/smoke-attach.js",
-    "smoke:act": "npm run build:node && node dist/node/backend/scripts/smoke-act.js"
+    "smoke:act": "npm run build:node && node dist/node/backend/scripts/smoke-act.js",
+    "smoke:input": "npm run build:node && node dist/node/backend/scripts/smoke-input.js"
   },
   "dependencies": {
     "@browserbasehq/stagehand": "4.3.0",
