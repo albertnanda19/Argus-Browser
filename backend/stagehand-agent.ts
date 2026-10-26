@@ -4,6 +4,7 @@ import {
   createStagehandRuntime,
   type AgentActSummary,
   type AgentAction,
+  type StagehandExtractSchema,
   type StagehandRuntime,
   type StagehandRuntimeFactory,
 } from "./stagehand-runtime";
@@ -79,6 +80,10 @@ export type StagehandAgent = {
   extractText(
     instruction: string,
     options?: { readonly screenshot?: boolean },
+  ): Promise<unknown>;
+  extractStructured(
+    instruction: string,
+    schema: StagehandExtractSchema,
   ): Promise<unknown>;
   preparePage(): Promise<{ readonly reloaded: boolean }>;
   close(): Promise<void>;
@@ -183,6 +188,26 @@ class StagehandAgentImpl implements StagehandAgent {
           this.runtime.extract(instruction, {
             timeoutMs: OPERATION_TIMEOUT_MS,
             screenshot: options?.screenshot === true,
+          }),
+        ),
+        OPERATION_TIMEOUT_MS,
+      );
+    } catch (error) {
+      throw this.mapFailure(error, "extract", "agent_extract_failed");
+    }
+  }
+
+  async extractStructured(
+    instruction: string,
+    schema: StagehandExtractSchema,
+  ): Promise<unknown> {
+    this.ensureOpen();
+
+    try {
+      return await withTimeout(
+        runOperation(() =>
+          this.runtime.extractStructured(instruction, schema, {
+            timeoutMs: OPERATION_TIMEOUT_MS,
           }),
         ),
         OPERATION_TIMEOUT_MS,

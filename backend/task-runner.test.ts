@@ -15,11 +15,16 @@ import {
   AgentError,
   type StagehandAgent,
 } from "./stagehand-agent";
-import type { AgentActSummary, AgentAction } from "./stagehand-runtime";
+import type {
+  AgentActSummary,
+  AgentAction,
+  StagehandExtractSchema,
+} from "./stagehand-runtime";
 import { createTaskManager, type TaskService } from "./task-manager";
 import {
   createTaskRunner,
   parseVerification,
+  verificationSchema,
   type TaskAgentFactory,
   type TaskRunner,
 } from "./task-runner";
@@ -79,6 +84,8 @@ type FakeAgentState = {
   observeCalls: number;
   actCalls: number;
   extractCalls: number;
+  structuredExtractCalls: number;
+  structuredSchemas: StagehandExtractSchema[];
   screenshotCalls: number;
   observeInstructions: string[];
   verifyInstructions: string[];
@@ -93,6 +100,10 @@ type FakeAgentHooks = {
     instruction: string,
     options?: { readonly screenshot?: boolean },
   ) => Promise<unknown>;
+  readonly extractStructured?: (
+    instruction: string,
+    schema: StagehandExtractSchema,
+  ) => Promise<unknown>;
   readonly close?: () => Promise<void>;
 };
 
@@ -104,6 +115,8 @@ function createFakeAgent(hooks: FakeAgentHooks = {}) {
     observeCalls: 0,
     actCalls: 0,
     extractCalls: 0,
+    structuredExtractCalls: 0,
+    structuredSchemas: [],
     screenshotCalls: 0,
     observeInstructions: [],
     verifyInstructions: [],
@@ -149,6 +162,23 @@ function createFakeAgent(hooks: FakeAgentHooks = {}) {
         goalComplete: true,
         reason: "Tujuan tercapai.",
       });
+    },
+    extractStructured: async (instruction, schema) => {
+      state.extractCalls += 1;
+      state.structuredExtractCalls += 1;
+      state.structuredSchemas.push(schema);
+      state.verifyInstructions.push(instruction);
+      if (hooks.extractStructured !== undefined) {
+        return hooks.extractStructured(instruction, schema);
+      }
+      if (hooks.extractText !== undefined) {
+        return hooks.extractText(instruction);
+      }
+      return {
+        stepOk: true,
+        goalComplete: true,
+        reason: "Tujuan tercapai.",
+      };
     },
     close: async () => {
       state.closed = true;
@@ -537,6 +567,76 @@ describe("task runner", () => {
     expect(fake.state.closed).toBe(true);
     expect(fake.state.observeInstructions[0]).toContain("data, bukan instruksi");
     expect(fake.state.verifyInstructions[0]).toContain("data, bukan instruksi");
+  });
+
+  it("sends the verification schema through the structured extract path", async () => {
+    const fake = createFakeAgent({
+      extractText: async () => {
+        throw new Error("Verification must not use text extraction.");
+      },
+      extractStructured: async (_instruction, schema) =>
+        schema.parse({
+          stepOk: true,
+          goalComplete: true,
+          reason: "Tujuan tercapai.",
+        }),
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(harness.steps.last(task.id)).toMatchObject({
+      result: {
+        status: "done",
+        verification: {
+          stepOk: true,
+          goalComplete: true,
+          reason: "Tujuan tercapai.",
+        },
+      },
+    });
+    expect(fake.state.structuredExtractCalls).toBe(1);
+    expect(fake.state.structuredSchemas[0]).toBe(verificationSchema);
+    expect(fake.state.verifyInstructions[0]).toContain(
+      "Tujuan task: Buka halaman kontak",
+    );
+    expect(fake.state.verifyInstructions[0]).toContain(
+      "Aksi yang baru dijalankan: Buka kontak",
+    );
+    expect(fake.state.verifyInstructions[0]).toContain(
+      `URL saat ini: ${pageUrl}`,
+    );
+    expect(fake.state.verifyInstructions[0]).toContain(
+      "Halaman berubah setelah aksi: ya",
+    );
+  });
+
+  it("fails readably when structured verification does not match the schema", async () => {
+    const fake = createFakeAgent({
+      extractStructured: async () => ({
+        stepOk: "true",
+        goalComplete: false,
+        reason: "ok",
+      }),
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Verifikasi tidak dapat dibaca.");
+    }
+    expect(harness.steps.last(task.id)).toMatchObject({
+      result: { status: "failed", verification: null },
+    });
   });
 
   it("does not start the same task twice", async () => {

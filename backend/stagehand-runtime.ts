@@ -1,3 +1,5 @@
+import type { z } from "zod";
+
 export type AgentAction = {
   readonly selector: string;
   readonly description: string;
@@ -10,6 +12,14 @@ export type AgentActSummary = {
   readonly actionCount: number;
 };
 
+export type StagehandExtractSchema = z.ZodType;
+
+type StagehandModule = typeof import("@browserbasehq/stagehand", {
+  with: { "resolution-mode": "import" },
+});
+type StagehandInstance = StagehandModule["Stagehand"]["prototype"];
+type StagehandZodSchema = Parameters<StagehandInstance["extract"]>[1];
+
 export type StagehandRuntimeOptions = {
   readonly cdpUrl: string;
   readonly modelName: string;
@@ -19,6 +29,10 @@ export type StagehandRuntimeOptions = {
 export type StagehandExtractOptions = {
   readonly timeoutMs: number;
   readonly screenshot: boolean;
+};
+
+export type StagehandStructuredExtractOptions = {
+  readonly timeoutMs: number;
 };
 
 export type StagehandPagePrepareOptions = {
@@ -36,6 +50,11 @@ export type StagehandRuntime = {
   observe(instruction: string, timeoutMs: number): Promise<readonly AgentAction[]>;
   act(input: string | AgentAction, timeoutMs: number): Promise<AgentActSummary>;
   extract(instruction: string, options: StagehandExtractOptions): Promise<unknown>;
+  extractStructured(
+    instruction: string,
+    schema: StagehandExtractSchema,
+    options: StagehandStructuredExtractOptions,
+  ): Promise<unknown>;
   preparePage(options: StagehandPagePrepareOptions): Promise<StagehandPagePreparation>;
   close(): Promise<void>;
 };
@@ -156,6 +175,18 @@ export function unwrapExtractionResult(data: unknown): unknown {
   return typeof data.extraction === "string" ? data.extraction : data;
 }
 
+function isStagehandZodSchema(value: unknown): value is StagehandZodSchema {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "_zod" in value &&
+    "parse" in value &&
+    typeof value.parse === "function" &&
+    "safeParse" in value &&
+    typeof value.safeParse === "function"
+  );
+}
+
 function toStagehandModelName(value: string): `google/${string}` {
   const prefix = "google/";
   if (!value.startsWith(prefix) || value.length === prefix.length) {
@@ -211,6 +242,17 @@ export const createStagehandRuntime: StagehandRuntimeFactory = async (options) =
         ...(extractOptions.screenshot ? { screenshot: true } : {}),
       });
       return unwrapExtractionResult(result.data);
+    },
+    async extractStructured(instruction, schema, extractOptions) {
+      if (!isStagehandZodSchema(schema)) {
+        throw new Error("The structured extract schema is not supported.");
+      }
+      const page = await resolvePage();
+      const result = await stagehand.extract(instruction, schema, {
+        page,
+        timeout: extractOptions.timeoutMs,
+      });
+      return result.data;
     },
     async preparePage(prepareOptions) {
       const page = await resolvePage();

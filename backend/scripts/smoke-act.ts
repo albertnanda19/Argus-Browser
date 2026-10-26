@@ -24,6 +24,7 @@ import { createStagehandAgent, type StagehandAgent } from "../stagehand-agent";
 import {
   buildVerifyInstruction,
   parseVerification,
+  verificationSchema,
 } from "../task-runner";
 
 const execFileAsync = promisify(execFile);
@@ -69,7 +70,7 @@ function createTempRoot(): string {
     workspaceRoot,
     "tmp",
     "testing",
-    `act-smoke-${randomBytes(4).toString("hex")}`,
+    `e4-verify-${randomBytes(4).toString("hex")}`,
   );
 }
 
@@ -94,15 +95,17 @@ function describeError(error: unknown): string {
 type RawVerificationShape = {
   readonly hasFence: boolean;
   readonly hasOutsideText: boolean;
+  readonly length: number;
   readonly excerpt: string;
 };
 
-function describeVerificationShape(raw: string): RawVerificationShape {
-  const fence = /```[\s\S]*?```/.exec(raw);
+function describeVerificationShape(raw: unknown): RawVerificationShape {
+  const text = typeof raw === "string" ? raw : JSON.stringify(raw) ?? "";
+  const fence = /```[\s\S]*?```/.exec(text);
   let outside: string;
 
   if (fence === null) {
-    const trimmed = raw.trim();
+    const trimmed = text.trim();
     const start = trimmed.indexOf("{");
     const end = trimmed.lastIndexOf("}");
     outside =
@@ -110,7 +113,7 @@ function describeVerificationShape(raw: string): RawVerificationShape {
         ? trimmed
         : `${trimmed.slice(0, start)}${trimmed.slice(end + 1)}`;
   } else {
-    outside = `${raw.slice(0, fence.index)}${raw.slice(
+    outside = `${text.slice(0, fence.index)}${text.slice(
       fence.index + fence[0].length,
     )}`;
   }
@@ -118,7 +121,8 @@ function describeVerificationShape(raw: string): RawVerificationShape {
   return {
     hasFence: fence !== null,
     hasOutsideText: outside.trim().length > 0,
-    excerpt: raw.replace(/\s+/g, " ").trim().slice(0, 200),
+    length: text.length,
+    excerpt: text.replace(/\s+/g, " ").trim().slice(0, 200),
   };
 }
 
@@ -421,17 +425,14 @@ async function runSteps(state: SmokeState): Promise<void> {
   );
 
   for (let index = 1; index <= 3; index += 1) {
-    const raw = await agent.extractText(verificationInstruction);
-    if (typeof raw !== "string") {
-      throw new Error(
-        `Verification ${index} returned ${Array.isArray(raw) ? "an array" : typeof raw}; expected a string.`,
-      );
-    }
-
+    const raw = await agent.extractStructured(
+      verificationInstruction,
+      verificationSchema,
+    );
     const shape = describeVerificationShape(raw);
     const verification = parseVerification(raw);
     console.log(
-      `verification ${index}: fence=${shape.hasFence} outsideText=${shape.hasOutsideText} length=${raw.length} excerpt="${shape.excerpt}" parsed=${verification !== null}${
+      `verification ${index}: type=${typeof raw} fence=${shape.hasFence} outsideText=${shape.hasOutsideText} length=${shape.length} excerpt="${shape.excerpt}" parsed=${verification !== null}${
         verification === null
           ? ""
           : ` stepOk=${verification.stepOk} goalComplete=${verification.goalComplete} reasonLength=${verification.reason.length}`
@@ -440,7 +441,7 @@ async function runSteps(state: SmokeState): Promise<void> {
 
     if (verification === null) {
       throw new Error(
-        `Verification ${index} could not be parsed from ${raw.length} characters.`,
+        `Verification ${index} could not be parsed from ${shape.length} characters.`,
       );
     }
   }

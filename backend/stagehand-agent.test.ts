@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { createStagehandAgent } from "./stagehand-agent";
 import type { ProviderConfig } from "../shared/provider";
 import type { ProviderAdapter, ProviderRegistry } from "./provider-registry";
@@ -6,6 +7,7 @@ import type { ProviderService } from "./provider-service";
 import type { StoredProviderConfig } from "./provider-store";
 import type {
   AgentAction,
+  StagehandExtractSchema,
   StagehandRuntime,
   StagehandRuntimeFactory,
   StagehandRuntimeOptions,
@@ -74,6 +76,9 @@ function createRuntime(overrides: Partial<StagehandRuntime> = {}): StagehandRunt
     },
     async extract() {
       return { extraction: "text" };
+    },
+    async extractStructured() {
+      return { stepOk: true };
     },
     async preparePage() {
       return { ready: true, reloaded: false };
@@ -639,6 +644,80 @@ describe("extractText", () => {
   });
 });
 
+describe("extractStructured", () => {
+  const structuredSchema = z.strictObject({
+    stepOk: z.boolean(),
+    goalComplete: z.boolean(),
+    reason: z.string().min(1).max(4_000),
+  });
+
+  it("forwards the exact schema and returns structured data with a sixty second timeout", async () => {
+    const calls: Array<{
+      readonly instruction: string;
+      readonly schema: StagehandExtractSchema;
+      readonly options: { readonly timeoutMs: number };
+    }> = [];
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async extractStructured(instruction, schema, options) {
+          calls.push({ instruction, schema, options });
+          return {
+            stepOk: true,
+            goalComplete: false,
+            reason: "Tombol menampilkan kode.",
+          };
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(
+      agent.extractStructured("Verify the step", structuredSchema),
+    ).resolves.toEqual({
+      stepOk: true,
+      goalComplete: false,
+      reason: "Tombol menampilkan kode.",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.instruction).toBe("Verify the step");
+    expect(calls[0]?.schema).toBe(structuredSchema);
+    expect(calls[0]?.options).toEqual({ timeoutMs: 60_000 });
+
+    await agent.close();
+  });
+
+  it("stops waiting after sixty seconds", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        extractStructured: () => new Promise(() => undefined),
+      }),
+    });
+    const agent = await fixture.createAgent();
+    vi.useFakeTimers();
+
+    const pending = agent.extractStructured("Verify the step", structuredSchema);
+    const assertion = expect(pending).rejects.toMatchObject({
+      code: "agent_timeout",
+      operation: "extract",
+    });
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    let isSettled = false;
+    void pending.then(
+      () => {
+        isSettled = true;
+      },
+      () => {
+        isSettled = true;
+      },
+    );
+    expect(isSettled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+  });
+});
+
 describe("preparePage", () => {
   it("does not reload a page whose locator world is ready", async () => {
     const calls: Array<{ readonly probeTimeoutMs: number; readonly reloadTimeoutMs: number }> = [];
@@ -760,6 +839,9 @@ describe("operation failures", () => {
         async extract() {
           throw new Error(`extract failed with ${FAKE_API_KEY}`);
         },
+        async extractStructured() {
+          throw new Error(`structured extract failed with ${FAKE_API_KEY}`);
+        },
       }),
     });
     const agent = await fixture.createAgent();
@@ -769,13 +851,21 @@ describe("operation failures", () => {
     const extractError = await agent
       .extractText("Read the heading")
       .catch((error: unknown) => error);
+    const structuredError = await agent
+      .extractStructured(
+        "Verify the heading",
+        z.strictObject({ stepOk: z.boolean() }),
+      )
+      .catch((error: unknown) => error);
 
     expect(observeError).toMatchObject({ code: "agent_observe_failed" });
     expect(actError).toMatchObject({ code: "agent_act_failed" });
     expect(extractError).toMatchObject({ code: "agent_extract_failed" });
+    expect(structuredError).toMatchObject({ code: "agent_extract_failed" });
     expect(String(observeError)).not.toContain(FAKE_API_KEY);
     expect(String(actError)).not.toContain(FAKE_API_KEY);
     expect(String(extractError)).not.toContain(FAKE_API_KEY);
+    expect(String(structuredError)).not.toContain(FAKE_API_KEY);
 
     await agent.close();
   });
