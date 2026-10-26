@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
 import type { DomainEvent } from "../shared/event";
+import type { ProfilePolicy } from "../shared/profile-policy";
 import type { Session } from "../shared/session";
 import type { Task } from "../shared/task";
 import { createApp } from "./app";
@@ -9,6 +10,15 @@ import { createAgentStepStore, type AgentStepVerification } from "./agent-steps"
 import type { BrowserPage, BrowserSessionContext } from "./browser-launcher";
 import { createEventBus, type EventBus } from "./event-bus";
 import { createEventStreamRegistry } from "./event-stream";
+import type { RandomSource } from "./human-like";
+import {
+  InputError,
+  type InputAction,
+  type InputErrorCode,
+  type InputExecutionResult,
+  type InputExecutor,
+  type InputExecutorOptions,
+} from "./input-executor";
 import type { ProviderRegistry } from "./provider-registry";
 import type { ProviderService } from "./provider-service";
 import {
@@ -26,6 +36,8 @@ import {
   parseVerification,
   verificationSchema,
   type TaskAgentFactory,
+  type TaskInputExecutorFactory,
+  type TaskPolicySource,
   type TaskRunner,
 } from "./task-runner";
 import { isIrreversibleAction } from "./irreversible-actions";
@@ -192,6 +204,56 @@ function createFakeAgent(hooks: FakeAgentHooks = {}) {
   return { agent, state };
 }
 
+type FakeInputExecutorState = {
+  readonly calls: InputAction[];
+  readonly signals: AbortSignal[];
+};
+
+function createFakeInputExecutor(
+  handler: (
+    action: InputAction,
+    signal: AbortSignal,
+  ) => Promise<InputExecutionResult> = async () => ({
+    status: "unsupported",
+    reason: "method_unsupported",
+  }),
+) {
+  const state: FakeInputExecutorState = { calls: [], signals: [] };
+  const executor: InputExecutor = {
+    execute: async (action, signal) => {
+      state.calls.push(action);
+      state.signals.push(signal);
+      return await handler(action, signal);
+    },
+  };
+
+  return { executor, state };
+}
+
+const permissivePolicy: ProfilePolicy = {
+  actionDelay: { mu: 0, sigma: 1, minMs: 0, maxMs: 0 },
+  typing: {
+    baseIntervalMs: 0,
+    burstIntervalMs: 0,
+    burstLength: 1,
+    afterBurstPauseMs: 0,
+  },
+  mouse: { steps: 1, overshootRatio: 0, curvature: 0, stepDelayMs: 0 },
+  scroll: { initialDeltaPx: 1, decay: 0.5, steps: 1, stepDelayMs: 0 },
+  reading: { msPerCharacter: 0, minMs: 0, maxMs: 0 },
+  workingHours: {
+    days: [1, 2, 3, 4, 5, 6, 7],
+    start: "00:00",
+    end: "23:59",
+  },
+};
+
+function createTestPolicy(overrides: Partial<ProfilePolicy> = {}): ProfilePolicy {
+  return { ...permissivePolicy, ...overrides };
+}
+
+const fixedRunnerNow = () => new Date(2026, 9, 26, 10, 0, 0);
+
 type FakeSessionsOptions = {
   readonly initialUrl?: string;
   readonly goto?: (url: string) => Promise<void>;
@@ -283,6 +345,10 @@ type RunnerHarnessOptions = {
   readonly maxDurationMs?: number;
   readonly shutdownTimeoutMs?: number;
   readonly now?: () => Date;
+  readonly profilePolicies?: TaskPolicySource;
+  readonly createInputExecutor?: TaskInputExecutorFactory;
+  readonly random?: RandomSource;
+  readonly inputTimeoutMs?: number;
 };
 
 function createRunnerHarness(options: RunnerHarnessOptions = {}) {
@@ -290,6 +356,13 @@ function createRunnerHarness(options: RunnerHarnessOptions = {}) {
   const sessions = options.sessions ?? createFakeSessions();
   const tasks = createTaskManager({ sessions, events });
   const steps = createAgentStepStore();
+  const policyCalls: string[] = [];
+  const profilePolicies: TaskPolicySource = options.profilePolicies ?? {
+    get: async (profileId) => {
+      policyCalls.push(profileId);
+      return permissivePolicy;
+    },
+  };
   const runner = createTaskRunner({
     sessions,
     tasks,
@@ -297,14 +370,20 @@ function createRunnerHarness(options: RunnerHarnessOptions = {}) {
     registry,
     steps,
     events,
+    profilePolicies,
+    createInputExecutor:
+      options.createInputExecutor ??
+      (() => createFakeInputExecutor().executor),
+    random: options.random,
+    inputTimeoutMs: options.inputTimeoutMs,
     createAgent: options.createAgent ?? (async () => createFakeAgent().agent),
     maxSteps: options.maxSteps,
     maxDurationMs: options.maxDurationMs,
     shutdownTimeoutMs: options.shutdownTimeoutMs,
-    now: options.now,
+    now: options.now ?? fixedRunnerNow,
   });
 
-  return { events, sessions, tasks, steps, runner };
+  return { events, sessions, tasks, steps, runner, policyCalls };
 }
 
 function createAppHarness(
@@ -1342,6 +1421,569 @@ describe("task runner", () => {
   });
 });
 
+describe("task runner human-like integration", () => {
+  const clickAction: AgentAction = {
+    selector: "#lanjut",
+    description: "Buka kontak",
+    method: "click",
+  };
+
+  it("fails outside the profile working hours before creating the agent", async () => {
+    let isAgentCreated = false;
+    let isExecutorCreated = false;
+    const harness = createRunnerHarness({
+      profilePolicies: {
+        get: async () =>
+          createTestPolicy({
+            workingHours: {
+              days: [1, 2, 3, 4, 5, 6, 7],
+              start: "09:00",
+              end: "10:00",
+            },
+          }),
+      },
+      now: () => new Date(2026, 9, 26, 12, 0, 0),
+      createAgent: async () => {
+        isAgentCreated = true;
+        return createFakeAgent().agent;
+      },
+      createInputExecutor: () => {
+        isExecutorCreated = true;
+        return createFakeInputExecutor().executor;
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Task di luar jam kerja profil.");
+    }
+    expect(isAgentCreated).toBe(false);
+    expect(isExecutorCreated).toBe(false);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("runs inside working hours and reads the policy once for the session profile", async () => {
+    const policy = createTestPolicy({
+      workingHours: {
+        days: [1, 2, 3, 4, 5, 6, 7],
+        start: "09:00",
+        end: "18:00",
+      },
+    });
+    const order: string[] = [];
+    const policyCalls: string[] = [];
+    const harness = createRunnerHarness({
+      profilePolicies: {
+        get: async (profileId) => {
+          order.push("policy");
+          policyCalls.push(profileId);
+          return policy;
+        },
+      },
+      now: () => new Date(2026, 9, 26, 10, 0, 0),
+      createAgent: async () => {
+        order.push("agent");
+        return createFakeAgent().agent;
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(policyCalls).toEqual(["p_0000000000000001"]);
+    expect(order).toEqual(["policy", "agent"]);
+  });
+
+  it("fails when the profile policy cannot be read", async () => {
+    const raw = "broken metadata secret";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      let isAgentCreated = false;
+      let isExecutorCreated = false;
+      const harness = createRunnerHarness({
+        profilePolicies: {
+          get: async () => {
+            throw new Error(raw);
+          },
+        },
+        createAgent: async () => {
+          isAgentCreated = true;
+          return createFakeAgent().agent;
+        },
+        createInputExecutor: () => {
+          isExecutorCreated = true;
+          return createFakeInputExecutor().executor;
+        },
+      });
+      const task = createTask(harness.tasks);
+      const terminal = waitForTerminal(harness.events, task.id);
+
+      harness.runner.start(task.id);
+      const event = await withDeadline(terminal);
+
+      expect(event.type).toBe("task.failed");
+      if (event.type === "task.failed") {
+        expect(event.reason).toBe("Policy profil tidak dapat dibaca.");
+      }
+      expect(isAgentCreated).toBe(false);
+      expect(isExecutorCreated).toBe(false);
+      expect(harness.steps.list(task.id)).toHaveLength(0);
+      expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain(
+        raw,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("cancels without creating the agent while reading the policy", async () => {
+    let announceRead: () => void = () => undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      announceRead = resolve;
+    });
+    let isAgentCreated = false;
+    const harness = createRunnerHarness({
+      profilePolicies: {
+        get: async () => {
+          announceRead();
+          return await new Promise<ProfilePolicy>(() => undefined);
+        },
+      },
+      createAgent: async () => {
+        isAgentCreated = true;
+        return createFakeAgent().agent;
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(readStarted);
+
+    const cancelStartedAt = Date.now();
+    harness.tasks.cancelTask(task.id);
+    harness.runner.cancel(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.cancelled");
+    expect(Date.now() - cancelStartedAt).toBeLessThan(500);
+    expect(isAgentCreated).toBe(false);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("runs a click through the input executor without calling agent.act", async () => {
+    const policy = createTestPolicy();
+    const random: RandomSource = () => 0.5;
+    const fake = createFakeAgent({
+      observe: async () => [clickAction],
+    });
+    const executor = createFakeInputExecutor(async () => ({
+      status: "done",
+      actionCount: 1,
+    }));
+    let executorOptions: InputExecutorOptions | undefined;
+    const harness = createRunnerHarness({
+      profilePolicies: { get: async () => policy },
+      createAgent: async () => fake.agent,
+      createInputExecutor: (options) => {
+        executorOptions = options;
+        return executor.executor;
+      },
+      random,
+      inputTimeoutMs: 12_345,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(executor.state.calls).toHaveLength(1);
+    expect(executor.state.signals[0]?.aborted).toBe(false);
+    expect(executor.state.calls[0]).toMatchObject({
+      selector: "#lanjut",
+      method: "click",
+    });
+    expect(fake.state.actCalls).toBe(0);
+    expect(fake.state.structuredExtractCalls).toBe(1);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      action: "click",
+      target: "Buka kontak",
+      result: { status: "done" },
+    });
+    expect(executorOptions?.policy).toBe(policy);
+    expect(executorOptions?.random).toBe(random);
+    expect(executorOptions?.timeoutMs).toBe(12_345);
+    expect(executorOptions?.context).toBe(
+      harness.sessions.getContext(readySessionId),
+    );
+  });
+
+  it("falls back to agent.act exactly once when the executor is unsupported", async () => {
+    const fake = createFakeAgent({
+      observe: async () => [clickAction],
+    });
+    const executor = createFakeInputExecutor(async () => ({
+      status: "unsupported",
+      reason: "method_unsupported",
+    }));
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+      createInputExecutor: () => executor.executor,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(executor.state.calls).toHaveLength(1);
+    expect(fake.state.actCalls).toBe(1);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      action: "click",
+      result: { status: "done" },
+    });
+  });
+
+  it.each<[Exclude<InputErrorCode, "input_cancelled">, string]>([
+    ["input_target_not_found", "Target aksi tidak ditemukan."],
+    ["input_timeout", "Aksi tidak selesai dalam batas waktu."],
+    ["input_failed", "Aksi gagal dijalankan."],
+  ])(
+    "fails without fallback when the executor throws %s",
+    async (code, reason) => {
+      const fake = createFakeAgent({
+        observe: async () => [clickAction],
+      });
+      const executor = createFakeInputExecutor(async () => {
+        throw new InputError(code);
+      });
+      const harness = createRunnerHarness({
+        createAgent: async () => fake.agent,
+        createInputExecutor: () => executor.executor,
+      });
+      const task = createTask(harness.tasks);
+      const terminal = waitForTerminal(harness.events, task.id);
+
+      harness.runner.start(task.id);
+      const event = await withDeadline(terminal);
+
+      expect(event.type).toBe("task.failed");
+      if (event.type === "task.failed") {
+        expect(event.reason).toBe(reason);
+      }
+      expect(fake.state.actCalls).toBe(0);
+      expect(fake.state.structuredExtractCalls).toBe(0);
+      expect(harness.steps.last(task.id)).toMatchObject({
+        action: "click",
+        result: { status: "failed", verification: null },
+      });
+    },
+  );
+
+  it("maps an unknown executor error without leaking its message", async () => {
+    const raw = "isi halaman rahasia";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const fake = createFakeAgent({
+        observe: async () => [clickAction],
+      });
+      const executor = createFakeInputExecutor(async () => {
+        throw new Error(raw);
+      });
+      const harness = createRunnerHarness({
+        createAgent: async () => fake.agent,
+        createInputExecutor: () => executor.executor,
+      });
+      const task = createTask(harness.tasks);
+      const terminal = waitForTerminal(harness.events, task.id);
+
+      harness.runner.start(task.id);
+      const event = await withDeadline(terminal);
+
+      expect(event.type).toBe("task.failed");
+      if (event.type === "task.failed") {
+        expect(event.reason).toBe("Aksi gagal dijalankan.");
+      }
+      expect(fake.state.actCalls).toBe(0);
+      expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain(
+        raw,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("treats an input cancellation from the executor as a task cancel", async () => {
+    const fake = createFakeAgent({
+      observe: async () => [clickAction],
+    });
+    const executor = createFakeInputExecutor(async () => {
+      throw new InputError("input_cancelled");
+    });
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+      createInputExecutor: () => executor.executor,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.cancelled");
+    expect(fake.state.actCalls).toBe(0);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("cancels quickly during the action delay without running the action", async () => {
+    let announceSample: () => void = () => undefined;
+    const sampleStarted = new Promise<void>((resolve) => {
+      announceSample = resolve;
+    });
+    const fake = createFakeAgent({
+      observe: async () => [clickAction],
+    });
+    const executor = createFakeInputExecutor(async () => ({
+      status: "done",
+      actionCount: 1,
+    }));
+    const harness = createRunnerHarness({
+      profilePolicies: {
+        get: async () =>
+          createTestPolicy({
+            actionDelay: { mu: 0, sigma: 1, minMs: 60_000, maxMs: 60_000 },
+          }),
+      },
+      createAgent: async () => fake.agent,
+      createInputExecutor: () => executor.executor,
+      random: () => {
+        announceSample();
+        return 0.5;
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(sampleStarted);
+
+    const cancelStartedAt = Date.now();
+    harness.tasks.cancelTask(task.id);
+    harness.runner.cancel(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.cancelled");
+    expect(Date.now() - cancelStartedAt).toBeLessThan(500);
+    expect(executor.state.calls).toHaveLength(0);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("cancels quickly while the input executor is still running", async () => {
+    let announceExecute: () => void = () => undefined;
+    const executeStarted = new Promise<void>((resolve) => {
+      announceExecute = resolve;
+    });
+    const fake = createFakeAgent({
+      observe: async () => [clickAction],
+    });
+    const executor = createFakeInputExecutor(async () => {
+      announceExecute();
+      return await new Promise<InputExecutionResult>(() => undefined);
+    });
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+      createInputExecutor: () => executor.executor,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(executeStarted);
+
+    const cancelStartedAt = Date.now();
+    harness.tasks.cancelTask(task.id);
+    harness.runner.cancel(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.cancelled");
+    expect(Date.now() - cancelStartedAt).toBeLessThan(500);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("waits for the sampled action delay before running the action", async () => {
+    let observeAt = 0;
+    let actionAt = 0;
+    const fake = createFakeAgent({
+      observe: async () => {
+        observeAt = Date.now();
+        return [clickAction];
+      },
+    });
+    const executor = createFakeInputExecutor(async () => {
+      actionAt = Date.now();
+      return { status: "done", actionCount: 1 };
+    });
+    const harness = createRunnerHarness({
+      profilePolicies: {
+        get: async () =>
+          createTestPolicy({
+            actionDelay: { mu: 0, sigma: 1, minMs: 50, maxMs: 50 },
+          }),
+      },
+      createAgent: async () => fake.agent,
+      createInputExecutor: () => executor.executor,
+      random: () => 0.5,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(actionAt - observeAt).toBeGreaterThanOrEqual(40);
+  });
+
+  it("cancels during the reading time before verification", async () => {
+    let snapshotCount = 0;
+    let announceAfterSnapshot: () => void = () => undefined;
+    const afterSnapshot = new Promise<void>((resolve) => {
+      announceAfterSnapshot = resolve;
+    });
+    const fake = createFakeAgent({
+      observe: async () => [clickAction],
+      snapshot: async () => {
+        snapshotCount += 1;
+        if (snapshotCount === 2) {
+          announceAfterSnapshot();
+        }
+        return { formattedTree: `tree-${snapshotCount}` };
+      },
+    });
+    const executor = createFakeInputExecutor(async () => ({
+      status: "done",
+      actionCount: 1,
+    }));
+    const harness = createRunnerHarness({
+      profilePolicies: {
+        get: async () =>
+          createTestPolicy({
+            reading: { msPerCharacter: 0, minMs: 60_000, maxMs: 60_000 },
+          }),
+      },
+      createAgent: async () => fake.agent,
+      createInputExecutor: () => executor.executor,
+      random: () => 0.5,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(afterSnapshot);
+
+    const cancelStartedAt = Date.now();
+    harness.tasks.cancelTask(task.id);
+    harness.runner.cancel(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.cancelled");
+    expect(Date.now() - cancelStartedAt).toBeLessThan(500);
+    expect(fake.state.structuredExtractCalls).toBe(0);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("waits for the post-action reading length before verification", async () => {
+    let snapshotCount = 0;
+    let afterSnapshotAt = 0;
+    let verificationAt = 0;
+    const fake = createFakeAgent({
+      observe: async () => [clickAction],
+      snapshot: async () => {
+        snapshotCount += 1;
+        if (snapshotCount === 2) {
+          afterSnapshotAt = Date.now();
+        }
+        return {
+          formattedTree: "x".repeat(snapshotCount === 2 ? 20 : 10),
+        };
+      },
+      extractStructured: async () => {
+        verificationAt = Date.now();
+        return {
+          stepOk: true,
+          goalComplete: true,
+          reason: "Tujuan tercapai.",
+        };
+      },
+    });
+    const executor = createFakeInputExecutor(async () => ({
+      status: "done",
+      actionCount: 1,
+    }));
+    const harness = createRunnerHarness({
+      profilePolicies: {
+        get: async () =>
+          createTestPolicy({
+            reading: { msPerCharacter: 5, minMs: 0, maxMs: 1_000 },
+          }),
+      },
+      createAgent: async () => fake.agent,
+      createInputExecutor: () => executor.executor,
+      random: () => 0.5,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(verificationAt - afterSnapshotAt).toBeGreaterThanOrEqual(80);
+  });
+
+  it("does not recheck working hours after the task starts", async () => {
+    let clock = new Date(2026, 9, 26, 17, 59, 0);
+    const fake = createFakeAgent({
+      observe: async () => {
+        clock = new Date(2026, 9, 26, 18, 1, 0);
+        return [clickAction];
+      },
+    });
+    const harness = createRunnerHarness({
+      profilePolicies: {
+        get: async () =>
+          createTestPolicy({
+            workingHours: {
+              days: [1, 2, 3, 4, 5, 6, 7],
+              start: "09:00",
+              end: "18:00",
+            },
+          }),
+      },
+      now: () => clock,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+  });
+});
+
 describe("task runner pre-navigation", () => {
   const goalUrl = "https://contoh.test/halaman";
 
@@ -1563,13 +2205,17 @@ describe("task runner pre-navigation", () => {
     expect(harness.steps.list(task.id)).toHaveLength(2);
   });
 
-  it("keeps the previous behavior when the session context is unavailable", async () => {
+  it("fails when the session context is unavailable", async () => {
     const sessions = createFakeSessions({ initialUrl: "about:blank" });
     sessions.setContextAvailable(false);
+    let isAgentCreated = false;
     const fake = createFakeAgent();
     const harness = createRunnerHarness({
       sessions,
-      createAgent: async () => fake.agent,
+      createAgent: async () => {
+        isAgentCreated = true;
+        return fake.agent;
+      },
     });
     const task = createTask(harness.tasks, `Buka ${goalUrl}`);
     const terminal = waitForTerminal(harness.events, task.id);
@@ -1577,13 +2223,13 @@ describe("task runner pre-navigation", () => {
     harness.runner.start(task.id);
     const event = await withDeadline(terminal);
 
-    expect(event.type).toBe("task.completed");
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Sesi tidak siap menjalankan task.");
+    }
+    expect(isAgentCreated).toBe(false);
     expect(sessions.gotoCalls).toHaveLength(0);
-    expect(harness.steps.list(task.id)).toHaveLength(1);
-    expect(harness.steps.last(task.id)).toMatchObject({
-      index: 1,
-      action: "act",
-    });
+    expect(harness.steps.list(task.id)).toHaveLength(0);
   });
 });
 

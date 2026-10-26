@@ -55,15 +55,6 @@ async function main(): Promise<void> {
     registry,
   });
   const steps = createAgentStepStore();
-  const runner = createTaskRunner({
-    sessions: sessionManager,
-    tasks,
-    providers,
-    registry,
-    steps,
-    events,
-  });
-
   const profiles: ProfileService = {
     list: () => listProfiles(appDataDir),
     create: (name) => createProfile(appDataDir, name),
@@ -73,6 +64,16 @@ async function main(): Promise<void> {
     get: (profileId) => getProfilePolicy(appDataDir, profileId),
     set: (profileId, policy) => setProfilePolicy(appDataDir, profileId, policy),
   };
+  const runner = createTaskRunner({
+    sessions: sessionManager,
+    tasks,
+    providers,
+    registry,
+    steps,
+    events,
+    profilePolicies,
+  });
+
   const sessions: SessionService = sessionManager;
 
   const server = serve({

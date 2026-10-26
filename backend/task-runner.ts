@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { ProfilePolicy } from "../shared/profile-policy";
 import type { Session } from "../shared/session";
 import {
   type AgentStepStatus,
@@ -8,6 +9,20 @@ import {
 } from "./agent-steps";
 import type { BrowserSessionContext } from "./browser-launcher";
 import type { EventBus } from "./event-bus";
+import {
+  createInputExecutor as createDefaultInputExecutor,
+  InputError,
+  type InputErrorCode,
+  type InputExecutionResult,
+  type InputExecutor,
+  type InputExecutorOptions,
+} from "./input-executor";
+import {
+  isWithinWorkingHours,
+  readingDurationMs,
+  sampleActionDelay,
+  type RandomSource,
+} from "./human-like";
 import { isIrreversibleAction } from "./irreversible-actions";
 import type { ProviderRegistry } from "./provider-registry";
 import type { ProviderService } from "./provider-service";
@@ -23,6 +38,7 @@ import type { TaskService } from "./task-manager";
 const DEFAULT_MAX_STEPS = 20;
 const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
+const DEFAULT_INPUT_TIMEOUT_MS = 30_000;
 
 const SESSION_NOT_READY_REASON = "Sesi tidak siap menjalankan task.";
 const SESSION_ENDED_REASON = "Sesi berakhir saat task berjalan.";
@@ -31,6 +47,19 @@ const NO_ACTION_REASON = "Agent tidak menemukan aksi untuk langkah ini.";
 const VERIFICATION_UNREADABLE_REASON = "Verifikasi tidak dapat dibaca.";
 const DEADLINE_REASON = "Batas waktu task terlampaui.";
 const INTERNAL_REASON = "Task gagal karena kesalahan internal.";
+const POLICY_UNREADABLE_REASON = "Policy profil tidak dapat dibaca.";
+const OUTSIDE_WORKING_HOURS_REASON = "Task di luar jam kerja profil.";
+const INPUT_TARGET_NOT_FOUND_REASON = "Target aksi tidak ditemukan.";
+const INPUT_TIMEOUT_REASON = "Aksi tidak selesai dalam batas waktu.";
+const INPUT_FAILED_REASON = "Aksi gagal dijalankan.";
+const INPUT_FAILURE_REASONS: Record<
+  Exclude<InputErrorCode, "input_cancelled">,
+  string
+> = {
+  input_target_not_found: INPUT_TARGET_NOT_FOUND_REASON,
+  input_timeout: INPUT_TIMEOUT_REASON,
+  input_failed: INPUT_FAILED_REASON,
+};
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const NAVIGATION_VERIFICATION_REASON = "Halaman berhasil dibuka.";
 const NAVIGATION_FAILED_REASON =
@@ -61,6 +90,14 @@ export type TaskSessionSource = {
   getContext?(sessionId: string): BrowserSessionContext | null;
 };
 
+export type TaskPolicySource = {
+  get(profileId: string): Promise<ProfilePolicy>;
+};
+
+export type TaskInputExecutorFactory = (
+  options: InputExecutorOptions,
+) => InputExecutor;
+
 export type TaskAgentFactory = (cdpUrl: string) => Promise<StagehandAgent>;
 
 export type TaskRunnerOptions = {
@@ -70,7 +107,11 @@ export type TaskRunnerOptions = {
   readonly registry: ProviderRegistry;
   readonly steps: AgentStepStore;
   readonly events: EventBus;
+  readonly profilePolicies: TaskPolicySource;
   readonly createAgent?: TaskAgentFactory;
+  readonly createInputExecutor?: TaskInputExecutorFactory;
+  readonly random?: RandomSource;
+  readonly inputTimeoutMs?: number;
   readonly now?: () => Date;
   readonly maxSteps?: number;
   readonly maxDurationMs?: number;
@@ -161,6 +202,49 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
       },
     );
   });
+}
+
+function waitForAbortableDuration(
+  durationMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(new CancelledError());
+  }
+
+  if (durationMs <= 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new CancelledError());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, durationMs);
+    timer.unref?.();
+
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function reasonForInputError(error: unknown): string {
+  if (error instanceof InputError && error.code !== "input_cancelled") {
+    return INPUT_FAILURE_REASONS[error.code];
+  }
+
+  return INPUT_FAILED_REASON;
+}
+
+function inputErrorLabel(error: unknown): string {
+  if (error instanceof InputError) {
+    return error.code;
+  }
+
+  return error instanceof Error ? error.name : "unknown";
 }
 
 function truncate(value: string, maxLength: number): string {
@@ -590,6 +674,10 @@ class TaskRunnerImpl implements TaskRunner {
   private readonly steps: AgentStepStore;
   private readonly events: EventBus;
   private readonly createAgent: TaskAgentFactory;
+  private readonly profilePolicies: TaskPolicySource;
+  private readonly createInputExecutor: TaskInputExecutorFactory;
+  private readonly random: RandomSource;
+  private readonly inputTimeoutMs: number;
   private readonly now: () => Date;
   private readonly maxSteps: number;
   private readonly maxDurationMs: number;
@@ -606,6 +694,11 @@ class TaskRunnerImpl implements TaskRunner {
     this.tasks = options.tasks;
     this.steps = options.steps;
     this.events = options.events;
+    this.profilePolicies = options.profilePolicies;
+    this.createInputExecutor =
+      options.createInputExecutor ?? createDefaultInputExecutor;
+    this.random = options.random ?? Math.random;
+    this.inputTimeoutMs = options.inputTimeoutMs ?? DEFAULT_INPUT_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
@@ -753,16 +846,44 @@ class TaskRunnerImpl implements TaskRunner {
     let stepCount = 0;
 
     try {
+      const session = this.sessions.get(record.sessionId);
+      if (session === null) {
+        this.failTask(record, SESSION_NOT_READY_REASON);
+        return;
+      }
+
       const cdpUrl = this.sessions.getCdpUrl(record.sessionId);
       if (cdpUrl === null) {
         this.failTask(record, SESSION_NOT_READY_REASON);
         return;
       }
 
+      const policy = await this.resolvePolicy(record, session.profileId);
+      if (policy === null) {
+        return;
+      }
+
+      if (!isWithinWorkingHours(policy, this.now())) {
+        this.failTask(record, OUTSIDE_WORKING_HOURS_REASON);
+        return;
+      }
+
+      const context = this.readContext(record.sessionId);
+      if (context === null) {
+        this.failTask(record, SESSION_NOT_READY_REASON);
+        return;
+      }
+
+      const executor = this.createInputExecutor({
+        context,
+        policy,
+        random: this.random,
+        timeoutMs: this.inputTimeoutMs,
+      });
       const goal = this.tasks.getTask(record.taskId)?.goal ?? "";
       agent = await this.createAgentForTask(record, cdpUrl);
 
-      const navigation = await this.navigateToGoalUrl(record, goal);
+      const navigation = await this.navigateToGoalUrl(record, goal, context);
       if (navigation === "failed") {
         return;
       }
@@ -805,7 +926,13 @@ class TaskRunnerImpl implements TaskRunner {
         }
 
         stepCount += 1;
-        const outcome = await this.runStep(record, agent, stepCount);
+        const outcome = await this.runStep({
+          record,
+          agent,
+          executor,
+          policy,
+          index: stepCount,
+        });
         if (outcome !== "continue") {
           return;
         }
@@ -833,17 +960,40 @@ class TaskRunnerImpl implements TaskRunner {
     }
   }
 
+  private async resolvePolicy(
+    record: RunRecord,
+    profileId: string,
+  ): Promise<ProfilePolicy | null> {
+    try {
+      return await raceAbort(
+        Promise.resolve().then(() => this.profilePolicies.get(profileId)),
+        record.controller.signal,
+      );
+    } catch (error) {
+      if (
+        error instanceof CancelledError ||
+        record.controller.signal.aborted
+      ) {
+        throw new CancelledError();
+      }
+
+      console.warn(
+        `Task policy read failed: ${record.taskId}: ${
+          error instanceof Error ? error.name : "unknown"
+        }`,
+      );
+      this.failTask(record, POLICY_UNREADABLE_REASON);
+      return null;
+    }
+  }
+
   private async navigateToGoalUrl(
     record: RunRecord,
     goal: string,
+    context: BrowserSessionContext,
   ): Promise<"skipped" | "navigated" | "failed"> {
     if (record.controller.signal.aborted) {
       throw new CancelledError();
-    }
-
-    const context = this.readContext(record.sessionId);
-    if (context === null) {
-      return "skipped";
     }
 
     const page = context.pages().at(-1) ?? (await context.newPage());
@@ -983,11 +1133,14 @@ class TaskRunnerImpl implements TaskRunner {
     }
   }
 
-  private async runStep(
-    record: RunRecord,
-    agent: StagehandAgent,
-    index: number,
-  ): Promise<StepOutcome> {
+  private async runStep(input: {
+    readonly record: RunRecord;
+    readonly agent: StagehandAgent;
+    readonly executor: InputExecutor;
+    readonly policy: ProfilePolicy;
+    readonly index: number;
+  }): Promise<StepOutcome> {
+    const { record, agent, executor, policy, index } = input;
     const startedAtMs = this.now().getTime();
     const goal = this.tasks.getTask(record.taskId)?.goal ?? "";
     let url = this.readUrl(record.sessionId);
@@ -1084,15 +1237,28 @@ class TaskRunnerImpl implements TaskRunner {
       return "failed";
     }
 
+    await this.waitForActionDelay(record, policy);
+
+    let executorResult: InputExecutionResult;
     try {
-      const summary = await this.callAgent(record, () => agent.act(action));
-      if (!summary.success) {
-        throw new AgentError("agent_act_failed", "act");
-      }
+      executorResult = await raceAbort(
+        Promise.resolve().then(() =>
+          executor.execute(action, record.controller.signal),
+        ),
+        record.controller.signal,
+      );
     } catch (error) {
-      if (error instanceof CancelledError) {
-        throw error;
+      if (record.controller.signal.aborted) {
+        throw new CancelledError();
       }
+      if (error instanceof InputError && error.code === "input_cancelled") {
+        this.cancelTaskFromInputCancellation(record);
+        throw new CancelledError();
+      }
+
+      console.warn(
+        `Task input action failed: ${record.taskId}: ${inputErrorLabel(error)}`,
+      );
       this.recordStep({
         record,
         action: actionKind,
@@ -1103,8 +1269,33 @@ class TaskRunnerImpl implements TaskRunner {
         verification: null,
         status: "failed",
       });
-      this.failTask(record, this.failureReason(record, error));
+      this.failTask(record, reasonForInputError(error));
       return "failed";
+    }
+
+    if (executorResult.status === "unsupported") {
+      try {
+        const summary = await this.callAgent(record, () => agent.act(action));
+        if (!summary.success) {
+          throw new AgentError("agent_act_failed", "act");
+        }
+      } catch (error) {
+        if (error instanceof CancelledError) {
+          throw error;
+        }
+        this.recordStep({
+          record,
+          action: actionKind,
+          target,
+          startedAtMs,
+          url,
+          pageChanged: false,
+          verification: null,
+          status: "failed",
+        });
+        this.failTask(record, this.failureReason(record, error));
+        return "failed";
+      }
     }
 
     let after: SnapshotEvidence | null;
@@ -1136,6 +1327,11 @@ class TaskRunnerImpl implements TaskRunner {
           url !== urlAfter
         : false;
     url = urlAfter;
+
+    await waitForAbortableDuration(
+      readingDurationMs(after?.length ?? before?.length ?? 0, policy),
+      record.controller.signal,
+    );
 
     let raw: unknown;
     try {
@@ -1225,6 +1421,27 @@ class TaskRunnerImpl implements TaskRunner {
     }
 
     return "continue";
+  }
+
+  private async waitForActionDelay(
+    record: RunRecord,
+    policy: ProfilePolicy,
+  ): Promise<void> {
+    await waitForAbortableDuration(
+      sampleActionDelay(policy, this.random),
+      record.controller.signal,
+    );
+  }
+
+  private cancelTaskFromInputCancellation(record: RunRecord): void {
+    record.isCancelRequested = true;
+    record.controller.abort();
+
+    try {
+      this.tasks.cancelTask(record.taskId);
+    } catch (error) {
+      this.ignoreTerminalError(record, error);
+    }
   }
 
   private async captureSnapshot(
