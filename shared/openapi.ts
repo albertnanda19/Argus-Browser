@@ -10,6 +10,7 @@ import {
   localExecutableRequestSchema,
   paginationQuerySchema,
   profileListResponseSchema,
+  profilePolicyResponseSchema,
   profileResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
@@ -25,6 +26,7 @@ import { actionRequestSchema, actionResponseSchema, actionResultSchema } from ".
 import { chromeInstallerStateSchema } from "./chrome-installer";
 import { healthResponseSchema, problemSchema } from "./contracts";
 import { profileIdSchema, profileSchema } from "./profile";
+import { profilePolicySchema } from "./profile-policy";
 import {
   providerConfigRequestSchema,
   providerConfigSchema,
@@ -93,6 +95,8 @@ const COMPONENTS: readonly ComponentDefinition[] = [
   { name: "LocalExecutableRequest", schema: localExecutableRequestSchema, io: "input" },
   { name: "Profile", schema: profileSchema, io: "output" },
   { name: "ProfileResponse", schema: profileResponseSchema, io: "output" },
+  { name: "ProfilePolicy", schema: profilePolicySchema, io: "output" },
+  { name: "ProfilePolicyResponse", schema: profilePolicyResponseSchema, io: "output" },
   { name: "ProfileListResponse", schema: profileListResponseSchema, io: "output" },
   { name: "CreateProfileRequest", schema: createProfileRequestSchema, io: "input" },
   { name: "Session", schema: sessionSchema, io: "output" },
@@ -375,6 +379,35 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
         "401": UNAUTHORIZED,
         "404": NOT_FOUND,
         "409": CONFLICT,
+        "422": UNPROCESSABLE,
+      },
+    },
+  },
+  "/profiles/{id}/policy": {
+    get: {
+      operationId: "getProfilePolicy",
+      summary: "Policy human-like efektif profil",
+      tags: ["Profiles"],
+      parameters: [PROFILE_ID_PARAMETER],
+      responses: {
+        "200": jsonResponse("Policy efektif profil.", "ProfilePolicyResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
+        "422": UNPROCESSABLE,
+      },
+    },
+    put: {
+      operationId: "updateProfilePolicy",
+      summary: "Ganti seluruh policy human-like profil",
+      tags: ["Profiles"],
+      parameters: [PROFILE_ID_PARAMETER],
+      requestBody: requestBody("ProfilePolicy"),
+      responses: {
+        "200": jsonResponse("Policy efektif profil.", "ProfilePolicyResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
         "422": UNPROCESSABLE,
       },
     },

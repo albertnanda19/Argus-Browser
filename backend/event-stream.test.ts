@@ -42,6 +42,14 @@ function createHarness(heartbeatMs = 60_000): Harness {
       setLocalBinary: async () => ({ ok: true, path: "/tmp/chrome", version: "1" }),
       clearLocalBinary: async () => readyState,
     },
+    profilePolicies: {
+      get: async () => {
+        throw new Error("Unused profile policy lookup.");
+      },
+      set: async () => {
+        throw new Error("Unused profile policy update.");
+      },
+    },
     profiles: {
       list: async () => [],
       create: async () => {

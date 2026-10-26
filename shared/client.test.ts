@@ -19,6 +19,7 @@ import type { HealthResponse, Problem } from "./contracts";
 import type { ProviderConfig, ProviderConfigRequest } from "./provider";
 import type { Approval, Task } from "./task";
 import type { Profile } from "./profile";
+import { createDefaultProfilePolicy } from "./profile-policy";
 import type { Session } from "./session";
 
 const token = "test-token-argus";
@@ -53,6 +54,8 @@ const profile: Profile = {
 };
 
 const profileResponse: ProfileResponse = { data: profile };
+
+const profilePolicy = createDefaultProfilePolicy();
 
 const profileList: ProfileListResponse = {
   data: [profile],
@@ -225,6 +228,12 @@ function routeResponse(method: string, pathname: string): Response {
   if (key === "GET /v1/profiles") return jsonResponse(profileList);
   if (key === "POST /v1/profiles") return jsonResponse(profileResponse, 201);
   if (key === `DELETE /v1/profiles/${profileId}`) return emptyResponse();
+  if (key === `GET /v1/profiles/${profileId}/policy`) {
+    return jsonResponse({ data: profilePolicy });
+  }
+  if (key === `PUT /v1/profiles/${profileId}/policy`) {
+    return jsonResponse({ data: profilePolicy });
+  }
   if (key === "GET /v1/sessions") return jsonResponse(sessionList);
   if (key === "POST /v1/sessions") return jsonResponse(sessionResponse, 201);
   if (key === `GET /v1/sessions/${sessionId}`) return jsonResponse(sessionResponse);
@@ -354,6 +363,8 @@ describe("createArgusClient", () => {
     await client.profiles.list();
     await client.profiles.create({ name: "Profil Kerja" });
     await client.profiles.delete(profileId);
+    const policyResult = await client.profiles.getPolicy(profileId);
+    const savedPolicy = await client.profiles.setPolicy(profileId, profilePolicy);
     await client.sessions.list();
     await client.sessions.start({ profileId });
     await client.sessions.get(sessionId);
@@ -383,6 +394,8 @@ describe("createArgusClient", () => {
       ["GET", "/v1/profiles"],
       ["POST", "/v1/profiles"],
       ["DELETE", `/v1/profiles/${profileId}`],
+      ["GET", `/v1/profiles/${profileId}/policy`],
+      ["PUT", `/v1/profiles/${profileId}/policy`],
       ["GET", "/v1/sessions"],
       ["POST", "/v1/sessions"],
       ["GET", `/v1/sessions/${sessionId}`],
@@ -431,6 +444,8 @@ describe("createArgusClient", () => {
 
     expect(healthResult).toEqual(health);
     expect(browserResult).toEqual(browserState);
+    expect(policyResult).toEqual({ data: profilePolicy });
+    expect(savedPolicy).toEqual({ data: profilePolicy });
     expect(providerResult).toEqual(providerConfig);
     expect(savedProvider).toEqual(providerConfig);
   });
@@ -442,6 +457,13 @@ describe("createArgusClient", () => {
     const client = createClient(stub.fetch);
 
     expect(Object.keys(client.providers).sort()).toEqual(["get", "set"]);
+    expect(Object.keys(client.profiles).sort()).toEqual([
+      "create",
+      "delete",
+      "getPolicy",
+      "list",
+      "setPolicy",
+    ]);
     expect(Object.keys(client).sort()).toEqual([
       "actions",
       "browser",
@@ -477,6 +499,7 @@ describe("createArgusClient", () => {
     });
     await client.actions.run(sessionId, { action: "click", selector: "#submit" });
     await client.providers.set(providerRequest);
+    await client.profiles.setPolicy(profileId, profilePolicy);
 
     const bodies = stub.calls.map((call, index) => {
       const body = call.init?.body;
@@ -496,6 +519,7 @@ describe("createArgusClient", () => {
     expect(bodies[4]).toEqual({ approve: false, reason: "Target salah." });
     expect(bodies[5]).toEqual({ action: "click", selector: "#submit" });
     expect(bodies[6]).toEqual(providerRequest);
+    expect(bodies[7]).toEqual(profilePolicy);
   });
 
   it("normalizes a trailing slash and forwards pagination only when provided", async () => {
@@ -540,6 +564,24 @@ describe("createArgusClient", () => {
     expect(result).toEqual(agentStepList);
     expect(headers.get("Authorization")).toBe(`Bearer ${token}`);
     expect(headers.get("Accept")).toBe("application/json");
+  });
+
+  it("rejects an invalid profile policy response", async () => {
+    const stub = createFetchStub(() =>
+      jsonResponse({
+        data: {
+          workingHours: { days: [1, 2, 3, 4, 5], start: "09:00", end: "18:00" },
+        },
+      }),
+    );
+    const client = createClient(stub.fetch);
+
+    const error = requireArgusError(
+      await captureError(() => client.profiles.getPolicy(profileId)),
+    );
+
+    expect(error.status).toBe(200);
+    expect(error.message).toBe("Respons Argus tidak valid.");
   });
 
   it("raises a 404 problem when listing steps for an unknown task", async () => {
@@ -594,7 +636,7 @@ describe("createArgusClient", () => {
     ]);
   });
 
-  it("exposes 21 documented methods", () => {
+  it("exposes 23 documented methods", () => {
     const stub = createFetchStub(() => jsonResponse(taskResponse));
     const client = createClient(stub.fetch);
     const methods = [
@@ -608,7 +650,7 @@ describe("createArgusClient", () => {
       ...Object.values(client.events),
     ];
 
-    expect(methods.filter((value) => typeof value === "function")).toHaveLength(21);
+    expect(methods.filter((value) => typeof value === "function")).toHaveLength(23);
   });
 
   it("does not read a body for 204 responses", async () => {

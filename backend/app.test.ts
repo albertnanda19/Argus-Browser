@@ -3,6 +3,10 @@ import type { Hono } from "hono";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
 import type { ChromeLocalValidation } from "./chrome-local-binary";
 import type { Profile } from "../shared/profile";
+import {
+  createDefaultProfilePolicy,
+  type ProfilePolicy,
+} from "../shared/profile-policy";
 import type { Session, SessionStatus } from "../shared/session";
 import { createApp } from "./app";
 import { createEventBus } from "./event-bus";
@@ -108,6 +112,23 @@ function createFakeProfiles(initial: Profile[] = []) {
   return { service, profiles };
 }
 
+function createFakeProfilePolicies() {
+  const policies = new Map<string, ProfilePolicy>();
+
+  const service = {
+    get: vi.fn(async (profileId: string): Promise<ProfilePolicy> => {
+      const policy = policies.get(profileId);
+      return policy === undefined ? createDefaultProfilePolicy() : structuredClone(policy);
+    }),
+    set: vi.fn(async (profileId: string, policy: ProfilePolicy): Promise<ProfilePolicy> => {
+      policies.set(profileId, structuredClone(policy));
+      return structuredClone(policy);
+    }),
+  };
+
+  return { service, policies };
+}
+
 function createFakeSessions() {
   const sessions = new Map<string, Session>();
   let sequence = 0;
@@ -151,17 +172,20 @@ function createFakeSessions() {
 
 type InstallerService = ReturnType<typeof createFakeInstaller>["service"];
 type ProfilesService = ReturnType<typeof createFakeProfiles>["service"];
+type ProfilePoliciesService = ReturnType<typeof createFakeProfilePolicies>["service"];
 type SessionsService = ReturnType<typeof createFakeSessions>["service"];
 
 function createHarness(
   overrides: {
     readonly chromeInstaller?: InstallerService;
     readonly profiles?: ProfilesService;
+    readonly profilePolicies?: ProfilePoliciesService;
     readonly sessions?: SessionsService;
   } = {},
 ) {
   const installer = createFakeInstaller();
   const profiles = createFakeProfiles();
+  const profilePolicies = createFakeProfilePolicies();
   const sessions = createFakeSessions();
   const events = createEventBus();
   const tasks = createTaskManager({
@@ -175,6 +199,7 @@ function createHarness(
     allowedOrigin,
     chromeInstaller: overrides.chromeInstaller ?? installer.service,
     profiles: overrides.profiles ?? profiles.service,
+    profilePolicies: overrides.profilePolicies ?? profilePolicies.service,
     sessions: overrides.sessions ?? sessions.service,
     tasks,
     steps: { listByTask: () => [] },
@@ -202,7 +227,7 @@ function createHarness(
     eventConnections: createEventStreamRegistry(),
   });
 
-  return { app, installer, profiles, sessions };
+  return { app, installer, profiles, profilePolicies, sessions };
 }
 
 function withAuth(init: RequestInit = {}): RequestInit {
@@ -693,6 +718,216 @@ describe("profile endpoints", () => {
     releaseDelete?.();
     expect((await deleteResponse).status).toBe(204);
     expect((await startResponse).status).toBe(404);
+  });
+});
+
+function invalidPolicyCases(): readonly { label: string; body: unknown }[] {
+  const base = createDefaultProfilePolicy();
+
+  return [
+    { label: "unknown top-level field", body: { ...base, extra: true } },
+    {
+      label: "unknown nested field",
+      body: { ...base, mouse: { ...base.mouse, extra: true } },
+    },
+    {
+      label: "zero sigma",
+      body: { ...base, actionDelay: { ...base.actionDelay, sigma: 0 } },
+    },
+    {
+      label: "minimum above maximum",
+      body: { ...base, actionDelay: { ...base.actionDelay, minMs: 900, maxMs: 100 } },
+    },
+    {
+      label: "empty burst length",
+      body: { ...base, typing: { ...base.typing, burstLength: 0 } },
+    },
+    {
+      label: "empty working days",
+      body: { ...base, workingHours: { ...base.workingHours, days: [] } },
+    },
+    {
+      label: "duplicate working days",
+      body: { ...base, workingHours: { ...base.workingHours, days: [1, 1] } },
+    },
+    {
+      label: "malformed start time",
+      body: { ...base, workingHours: { ...base.workingHours, start: "9:00" } },
+    },
+    {
+      label: "equal working hours",
+      body: { ...base, workingHours: { ...base.workingHours, start: "09:00", end: "09:00" } },
+    },
+    {
+      label: "window crossing midnight",
+      body: { ...base, workingHours: { ...base.workingHours, start: "22:00", end: "06:00" } },
+    },
+    {
+      label: "reading minimum above maximum",
+      body: { ...base, reading: { ...base.reading, minMs: 8000, maxMs: 100 } },
+    },
+    {
+      label: "decay outside range",
+      body: { ...base, scroll: { ...base.scroll, decay: 1 } },
+    },
+    {
+      label: "negative step delay",
+      body: { ...base, mouse: { ...base.mouse, stepDelayMs: -1 } },
+    },
+  ];
+}
+
+describe("profile policy endpoints", () => {
+  it("requires a bearer token", async () => {
+    const profile = makeProfile();
+    const { app } = createHarness();
+    const response = await app.request(`/v1/profiles/${profile.id}/policy`);
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("content-type")).toContain("application/problem+json");
+  });
+
+  it("returns the effective default policy for a profile", async () => {
+    const profile = makeProfile();
+    const profilePolicies = createFakeProfilePolicies();
+    const { app } = createHarness({ profilePolicies: profilePolicies.service });
+    const response = await app.request(`/v1/profiles/${profile.id}/policy`, withAuth());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      data: createDefaultProfilePolicy(),
+    });
+  });
+
+  it("rejects an invalid profile id with 400", async () => {
+    const { app } = createHarness();
+    const response = await app.request("/v1/profiles/not-a-profile/policy", withAuth());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      status: 400,
+      detail: "Id profil tidak valid.",
+    });
+  });
+
+  it("returns 404 when the profile does not exist", async () => {
+    const profile = makeProfile();
+    const profilePolicies = createFakeProfilePolicies();
+    profilePolicies.service.get.mockRejectedValueOnce(
+      new ProfileStoreError("profile_not_found", "Profil tidak ditemukan."),
+    );
+    const { app } = createHarness({ profilePolicies: profilePolicies.service });
+    const response = await app.request(`/v1/profiles/${profile.id}/policy`, withAuth());
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      status: 404,
+      detail: "Profil tidak ditemukan.",
+    });
+  });
+
+  it("returns 422 when profile metadata is corrupt", async () => {
+    const profile = makeProfile();
+    const profilePolicies = createFakeProfilePolicies();
+    profilePolicies.service.get.mockRejectedValueOnce(
+      new ProfileStoreError(
+        "corrupt_profile_metadata",
+        "Metadata profil rusak dan tidak dapat dibaca.",
+      ),
+    );
+    const { app } = createHarness({ profilePolicies: profilePolicies.service });
+    const response = await app.request(`/v1/profiles/${profile.id}/policy`, withAuth());
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({ status: 422 });
+  });
+
+  it("replaces the whole policy and returns the effective policy", async () => {
+    const profile = makeProfile();
+    const profilePolicies = createFakeProfilePolicies();
+    const { app } = createHarness({ profilePolicies: profilePolicies.service });
+    const policy = createDefaultProfilePolicy();
+    policy.workingHours = { days: [1, 3, 5], start: "07:30", end: "16:15" };
+
+    const response = await app.request(
+      `/v1/profiles/${profile.id}/policy`,
+      jsonBody("PUT", policy),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ data: policy });
+    expect(profilePolicies.service.set).toHaveBeenCalledWith(profile.id, policy);
+  });
+
+  it.each(invalidPolicyCases())("rejects an invalid policy with 400: $label", async ({ body }) => {
+    const profile = makeProfile();
+    const profilePolicies = createFakeProfilePolicies();
+    const { app } = createHarness({ profilePolicies: profilePolicies.service });
+    const response = await app.request(
+      `/v1/profiles/${profile.id}/policy`,
+      jsonBody("PUT", body),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      status: 400,
+      detail: "Body permintaan tidak valid.",
+    });
+    expect(profilePolicies.service.set).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-finite number with 400", async () => {
+    const profile = makeProfile();
+    const profilePolicies = createFakeProfilePolicies();
+    const { app } = createHarness({ profilePolicies: profilePolicies.service });
+    const body = JSON.stringify(createDefaultProfilePolicy()).replace(
+      '"sigma":0.4',
+      '"sigma":1e999',
+    );
+    const response = await app.request(`/v1/profiles/${profile.id}/policy`, {
+      method: "PUT",
+      headers: {
+        Authorization: authorization,
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+
+    expect(response.status).toBe(400);
+    expect(profilePolicies.service.set).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when updating a policy for a missing profile", async () => {
+    const profile = makeProfile();
+    const profilePolicies = createFakeProfilePolicies();
+    profilePolicies.service.set.mockRejectedValueOnce(
+      new ProfileStoreError("profile_not_found", "Profil tidak ditemukan."),
+    );
+    const { app } = createHarness({ profilePolicies: profilePolicies.service });
+    const response = await app.request(
+      `/v1/profiles/${profile.id}/policy`,
+      jsonBody("PUT", createDefaultProfilePolicy()),
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("returns 422 when updating a policy on corrupt metadata", async () => {
+    const profile = makeProfile();
+    const profilePolicies = createFakeProfilePolicies();
+    profilePolicies.service.set.mockRejectedValueOnce(
+      new ProfileStoreError(
+        "corrupt_profile_metadata",
+        "Metadata profil rusak dan tidak dapat dibaca.",
+      ),
+    );
+    const { app } = createHarness({ profilePolicies: profilePolicies.service });
+    const response = await app.request(
+      `/v1/profiles/${profile.id}/policy`,
+      jsonBody("PUT", createDefaultProfilePolicy()),
+    );
+
+    expect(response.status).toBe(422);
   });
 });
 

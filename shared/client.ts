@@ -12,6 +12,7 @@ import {
   approvalResponseSchema,
   browserStateResponseSchema,
   profileListResponseSchema,
+  profilePolicyResponseSchema,
   profileResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
@@ -23,6 +24,7 @@ import {
   type CreateTaskRequest,
   type PaginationQuery,
   type ProfileListResponse,
+  type ProfilePolicyResponse,
   type ProfileResponse,
   type SessionListResponse,
   type SessionResponse,
@@ -37,6 +39,7 @@ import {
   type Problem,
 } from "./contracts";
 import { domainEventSchema, type DomainEvent } from "./event";
+import type { ProfilePolicy } from "./profile-policy";
 import {
   providerResponseSchema,
   type ProviderConfig,
@@ -104,6 +107,8 @@ export type ArgusClient = {
     list(query?: Partial<PaginationQuery>): Promise<ProfileListResponse>;
     create(input: CreateProfileRequest): Promise<ProfileResponse>;
     delete(id: string): Promise<void>;
+    getPolicy(id: string): Promise<ProfilePolicyResponse>;
+    setPolicy(id: string, policy: ProfilePolicy): Promise<ProfilePolicyResponse>;
   };
   readonly sessions: {
     list(query?: Partial<PaginationQuery>): Promise<SessionListResponse>;
@@ -464,6 +469,20 @@ export function createArgusClient(options: ArgusClientOptions): ArgusClient {
         requestVoid(config, `/profiles/${encodeURIComponent(id)}`, {
           method: "DELETE",
         }),
+      getPolicy: (id) =>
+        request(
+          config,
+          profilePolicyResponseSchema,
+          `/profiles/${encodeURIComponent(id)}/policy`,
+          { method: "GET" },
+        ),
+      setPolicy: (id, policy) =>
+        request(
+          config,
+          profilePolicyResponseSchema,
+          `/profiles/${encodeURIComponent(id)}/policy`,
+          { method: "PUT", body: policy },
+        ),
     },
     sessions: {
       list: (query) =>

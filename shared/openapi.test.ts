@@ -14,6 +14,7 @@ import { chromeInstallerStateSchema } from "./chrome-installer";
 import { problemSchema } from "./contracts";
 import { createOpenApiDocument, type OpenApiOperation } from "./openapi";
 import { profileSchema } from "./profile";
+import { profilePolicySchema } from "./profile-policy";
 import {
   providerConfigRequestSchema,
   providerConfigSchema,
@@ -34,6 +35,8 @@ const EXPECTED_OPERATIONS = [
   "GET /profiles",
   "POST /profiles",
   "DELETE /profiles/{id}",
+  "GET /profiles/{id}/policy",
+  "PUT /profiles/{id}/policy",
   "GET /sessions",
   "POST /sessions",
   "GET /sessions/{id}",
@@ -185,8 +188,8 @@ describe("OpenAPI document", () => {
     const document = createOpenApiDocument();
     const operations = allOperations().map(({ method, path }) => `${method.toUpperCase()} ${path}`);
 
-    expect(Object.keys(document.paths)).toHaveLength(17);
-    expect(operations).toHaveLength(22);
+    expect(Object.keys(document.paths)).toHaveLength(18);
+    expect(operations).toHaveLength(24);
     expect(new Set(operations)).toEqual(new Set(EXPECTED_OPERATIONS));
   });
 
@@ -256,6 +259,7 @@ describe("OpenAPI document", () => {
     expect(schemas.ChromeInstallerState).toEqual(
       generatedJsonSchema(chromeInstallerStateSchema, "output"),
     );
+    expect(schemas.ProfilePolicy).toEqual(generatedJsonSchema(profilePolicySchema, "output"));
     expect(schemas.ProviderConfig).toEqual(generatedJsonSchema(providerConfigSchema, "output"));
     expect(schemas.UpdateProviderRequest).toEqual(
       generatedJsonSchema(providerConfigRequestSchema, "input"),
@@ -270,7 +274,34 @@ describe("OpenAPI document", () => {
     expect(schemas.AgentStepListResponse).toEqual(
       agentComponents.AgentStepListResponse,
     );
-    expect(Object.keys(schemas)).toHaveLength(29);
+    expect(Object.keys(schemas)).toHaveLength(31);
+  });
+
+  it("documents profile policy reads and writes", () => {
+    const document = createOpenApiDocument();
+    const schemas = document.components.schemas;
+    const getOperation = operationAt("get", "/profiles/{id}/policy");
+    const putOperation = operationAt("put", "/profiles/{id}/policy");
+
+    expect(getOperation.responses["200"]).toEqual({
+      description: "Policy efektif profil.",
+      content: {
+        "application/json": { schema: { $ref: "#/components/schemas/ProfilePolicyResponse" } },
+      },
+    });
+    expect(putOperation.requestBody).toEqual({
+      required: true,
+      content: {
+        "application/json": { schema: { $ref: "#/components/schemas/ProfilePolicy" } },
+      },
+    });
+    expect(putOperation.responses["200"]).toEqual(getOperation.responses["200"]);
+    expect(schemas.ProfilePolicyResponse).toEqual({
+      type: "object",
+      properties: { data: { $ref: "#/components/schemas/ProfilePolicy" } },
+      required: ["data"],
+      additionalProperties: false,
+    });
   });
   it("documents provider configuration without returning the API key", () => {
     const document = createOpenApiDocument();

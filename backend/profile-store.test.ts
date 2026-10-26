@@ -4,11 +4,17 @@ import { join, resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { profileSchema, type Profile } from "../shared/profile";
 import {
+  createDefaultProfilePolicy,
+  type ProfilePolicy,
+} from "../shared/profile-policy";
+import {
   createProfile,
   deleteProfile,
   getProfile,
+  getProfilePolicy,
   listProfiles,
   resolveProfileDir,
+  setProfilePolicy,
   updateLastUsedAt,
 } from "./profile-store";
 
@@ -28,6 +34,22 @@ async function seedProfile(appDataDir: string, profile: Profile): Promise<void> 
   const profileDir = resolveProfileDir(appDataDir, profile.id);
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
   await writeFile(join(profileDir, "profile.json"), JSON.stringify(profile), { mode: 0o600 });
+}
+
+function customPolicy(): ProfilePolicy {
+  return {
+    actionDelay: { mu: 6.2, sigma: 0.55, minMs: 180, maxMs: 4200 },
+    typing: {
+      baseIntervalMs: 95,
+      burstIntervalMs: 28,
+      burstLength: 9,
+      afterBurstPauseMs: 410,
+    },
+    mouse: { steps: 18, overshootRatio: 0.22, curvature: 0.31, stepDelayMs: 12 },
+    scroll: { initialDeltaPx: 640, decay: 0.74, steps: 11, stepDelayMs: 25 },
+    reading: { msPerCharacter: 42, minMs: 300, maxMs: 7200 },
+    workingHours: { days: [1, 2, 3, 4], start: "08:15", end: "17:45" },
+  };
 }
 
 beforeAll(async () => {
@@ -226,6 +248,144 @@ describe("getProfile", () => {
   });
 });
 
+describe("getProfilePolicy", () => {
+  it("returns the default policy for a new profile", async () => {
+    const appDataDir = newAppDataDir();
+    const created = await createProfile(appDataDir, "Default");
+
+    const policy = await getProfilePolicy(appDataDir, created.id);
+
+    expect(policy).toEqual(createDefaultProfilePolicy());
+    expect(policy.workingHours).toEqual({
+      days: [1, 2, 3, 4, 5],
+      start: "09:00",
+      end: "18:00",
+    });
+    expect(policy.actionDelay.sigma).toBeGreaterThan(0);
+    expect(policy.actionDelay.minMs).toBeLessThanOrEqual(policy.actionDelay.maxMs);
+    expect(policy.typing.baseIntervalMs).not.toBe(policy.typing.burstIntervalMs);
+    expect(policy.typing.burstLength).toBeGreaterThan(1);
+    expect(policy.mouse.overshootRatio).toBeGreaterThan(0);
+    expect(policy.mouse.curvature).toBeGreaterThan(0);
+    expect(policy.scroll.decay).toBeGreaterThan(0);
+    expect(policy.scroll.decay).toBeLessThan(1);
+    expect(policy.reading.minMs).toBeLessThanOrEqual(policy.reading.maxMs);
+  });
+
+  it("returns the default policy for legacy metadata without a policy", async () => {
+    const appDataDir = newAppDataDir();
+    const legacy: Profile = {
+      id: "p_aaaaaaaaaaaaaaaa",
+      name: "Lama",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: null,
+    };
+    await seedProfile(appDataDir, legacy);
+
+    await expect(getProfilePolicy(appDataDir, legacy.id)).resolves.toEqual(
+      createDefaultProfilePolicy(),
+    );
+  });
+
+  it("rejects an unknown id with profile_not_found", async () => {
+    await expect(
+      getProfilePolicy(newAppDataDir(), "p_bbbbbbbbbbbbbbbb"),
+    ).rejects.toMatchObject({
+      name: "ProfileStoreError",
+      code: "profile_not_found",
+    });
+  });
+
+  it("rejects corrupt metadata with corrupt_profile_metadata", async () => {
+    const appDataDir = newAppDataDir();
+    const profileId = "p_cccccccccccccccc";
+    const profileDir = resolveProfileDir(appDataDir, profileId);
+    await mkdir(profileDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(profileDir, "profile.json"), "{rusak", { mode: 0o600 });
+
+    await expect(getProfilePolicy(appDataDir, profileId)).rejects.toMatchObject({
+      code: "corrupt_profile_metadata",
+    });
+  });
+});
+
+describe("setProfilePolicy", () => {
+  it("persists the complete policy atomically without changing profile fields", async () => {
+    const appDataDir = newAppDataDir();
+    const created = await createProfile(appDataDir, "Kerja");
+    const usedAt = new Date("2026-02-03T04:05:06.789Z");
+    const withUsage = await updateLastUsedAt(appDataDir, created.id, usedAt);
+    const policy = customPolicy();
+
+    const saved = await setProfilePolicy(appDataDir, created.id, policy);
+
+    expect(saved).toEqual(policy);
+    await expect(getProfilePolicy(appDataDir, created.id)).resolves.toEqual(policy);
+    await expect(getProfile(appDataDir, created.id)).resolves.toEqual(withUsage);
+
+    const profileDir = resolveProfileDir(appDataDir, created.id);
+    const metadataFile = join(profileDir, "profile.json");
+    expect(await readdir(profileDir)).toEqual(["profile.json"]);
+    expect((await stat(metadataFile)).mode & 0o777).toBe(0o600);
+
+    const stored = JSON.parse(await readFile(metadataFile, "utf8")) as Record<string, unknown>;
+    const storedPolicy = stored.policy;
+    expect(storedPolicy).toEqual(policy);
+    delete stored.policy;
+    expect(profileSchema.parse(stored)).toEqual(withUsage);
+  });
+
+  it("keeps policies isolated per profile", async () => {
+    const appDataDir = newAppDataDir();
+    const first = await createProfile(appDataDir, "Pertama");
+    const second = await createProfile(appDataDir, "Kedua");
+    const firstPolicy = customPolicy();
+    const secondPolicy: ProfilePolicy = {
+      ...createDefaultProfilePolicy(),
+      workingHours: { days: [6, 7], start: "10:00", end: "14:00" },
+    };
+
+    await setProfilePolicy(appDataDir, first.id, firstPolicy);
+    await setProfilePolicy(appDataDir, second.id, secondPolicy);
+
+    await expect(getProfilePolicy(appDataDir, first.id)).resolves.toEqual(firstPolicy);
+    await expect(getProfilePolicy(appDataDir, second.id)).resolves.toEqual(secondPolicy);
+  });
+
+  it("does not expose the policy through profile reads", async () => {
+    const appDataDir = newAppDataDir();
+    const created = await createProfile(appDataDir, "Privat");
+    await setProfilePolicy(appDataDir, created.id, customPolicy());
+
+    const profile = await getProfile(appDataDir, created.id);
+    const listed = await listProfiles(appDataDir);
+
+    expect(profile).toEqual(created);
+    expect(Object.hasOwn(profile, "policy")).toBe(false);
+    expect(listed).toEqual([created]);
+  });
+
+  it("rejects an unknown id with profile_not_found", async () => {
+    await expect(
+      setProfilePolicy(newAppDataDir(), "p_dddddddddddddddd", customPolicy()),
+    ).rejects.toMatchObject({ code: "profile_not_found" });
+  });
+
+  it("rejects corrupt metadata without overwriting it", async () => {
+    const appDataDir = newAppDataDir();
+    const profileId = "p_eeeeeeeeeeeeeeee";
+    const profileDir = resolveProfileDir(appDataDir, profileId);
+    await mkdir(profileDir, { recursive: true, mode: 0o700 });
+    const metadataFile = join(profileDir, "profile.json");
+    await writeFile(metadataFile, "rusak", { mode: 0o600 });
+
+    await expect(
+      setProfilePolicy(appDataDir, profileId, customPolicy()),
+    ).rejects.toMatchObject({ code: "corrupt_profile_metadata" });
+    await expect(readFile(metadataFile, "utf8")).resolves.toBe("rusak");
+  });
+});
+
 describe("deleteProfile", () => {
   it("removes the whole profile directory including nested data", async () => {
     const appDataDir = newAppDataDir();
@@ -280,6 +440,22 @@ describe("updateLastUsedAt", () => {
 
     const stored: unknown = JSON.parse(await readFile(join(profileDir, "profile.json"), "utf8"));
     expect(profileSchema.parse(stored).lastUsedAt).toBe("2026-02-03T04:05:06.789Z");
+  });
+
+  it("keeps a stored policy when updating lastUsedAt", async () => {
+    const appDataDir = newAppDataDir();
+    const created = await createProfile(appDataDir, "Sesi");
+    const policy = customPolicy();
+    await setProfilePolicy(appDataDir, created.id, policy);
+
+    const updated = await updateLastUsedAt(
+      appDataDir,
+      created.id,
+      new Date("2026-03-04T05:06:07.890Z"),
+    );
+
+    expect(updated.lastUsedAt).toBe("2026-03-04T05:06:07.890Z");
+    await expect(getProfilePolicy(appDataDir, created.id)).resolves.toEqual(policy);
   });
 
   it("rejects an unknown id with profile_not_found", async () => {

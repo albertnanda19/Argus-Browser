@@ -16,6 +16,7 @@ import {
   localExecutableRequestSchema,
   paginationQuerySchema,
   profileListResponseSchema,
+  profilePolicyResponseSchema,
   profileResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
@@ -26,6 +27,7 @@ import type { ChromeInstallerState } from "../shared/chrome-installer";
 import { healthResponseSchema } from "../shared/contracts";
 import { createOpenApiDocument } from "../shared/openapi";
 import { profileIdSchema, type Profile } from "../shared/profile";
+import { profilePolicySchema, type ProfilePolicy } from "../shared/profile-policy";
 import {
   providerConfigRequestSchema,
   providerResponseSchema,
@@ -65,6 +67,11 @@ export type ProfileService = {
   delete(profileId: string): Promise<void>;
 };
 
+export type ProfilePolicyService = {
+  get(profileId: string): Promise<ProfilePolicy>;
+  set(profileId: string, policy: ProfilePolicy): Promise<ProfilePolicy>;
+};
+
 export type SessionService = {
   start(profileId: string): Promise<Session>;
   listActive(): Session[];
@@ -91,6 +98,7 @@ export type AppOptions = {
   readonly allowedOrigin: string;
   readonly chromeInstaller: ChromeInstallerApi;
   readonly profiles: ProfileService;
+  readonly profilePolicies: ProfilePolicyService;
   readonly sessions: SessionService;
   readonly tasks: TaskService;
   readonly steps: AgentStepService;
@@ -339,6 +347,41 @@ export function createApp(options: AppOptions): Hono {
       }
 
       return c.body(null, 204);
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
+  });
+
+  app.get("/v1/profiles/:id/policy", async (c) => {
+    const parsedId = profileIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id profil tidak valid.");
+    }
+
+    try {
+      const policy = await options.profilePolicies.get(parsedId.data);
+      return c.json(profilePolicyResponseSchema.parse({ data: policy }), 200);
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
+  });
+
+  app.put("/v1/profiles/:id/policy", async (c) => {
+    const parsedId = profileIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id profil tidak valid.");
+    }
+
+    const body = await parseJsonBody(c, profilePolicySchema);
+    if (!body.ok) {
+      return problemResponse(c, 400, "Body permintaan tidak valid.");
+    }
+
+    try {
+      const policy = await profileLock.run(parsedId.data, () =>
+        options.profilePolicies.set(parsedId.data, body.data),
+      );
+      return c.json(profilePolicyResponseSchema.parse({ data: policy }), 200);
     } catch (error) {
       return handleKnownError(c, error);
     }

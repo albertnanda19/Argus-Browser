@@ -3,13 +3,24 @@ import { once } from "node:events";
 import { serve } from "@hono/node-server";
 import { createActionManager } from "./action-manager";
 import { createAgentStepStore } from "./agent-steps";
-import { createApp, type ProfileService, type SessionService } from "./app";
+import {
+  createApp,
+  type ProfilePolicyService,
+  type ProfileService,
+  type SessionService,
+} from "./app";
 import { resolveAppDataDir, writeApiCredentials } from "./app-data";
 import { createChromeInstaller } from "./chrome-installer";
 import { ChromeFailure } from "./chrome-errors";
 import { createEventBus } from "./event-bus";
 import { createEventStreamRegistry } from "./event-stream";
-import { createProfile, deleteProfile, listProfiles } from "./profile-store";
+import {
+  createProfile,
+  deleteProfile,
+  getProfilePolicy,
+  listProfiles,
+  setProfilePolicy,
+} from "./profile-store";
 import { createProviderRegistry } from "./provider-registry";
 import { createProviderService } from "./provider-service";
 import { createSessionManager } from "./session-manager";
@@ -58,6 +69,10 @@ async function main(): Promise<void> {
     create: (name) => createProfile(appDataDir, name),
     delete: (profileId) => deleteProfile(appDataDir, profileId),
   };
+  const profilePolicies: ProfilePolicyService = {
+    get: (profileId) => getProfilePolicy(appDataDir, profileId),
+    set: (profileId, policy) => setProfilePolicy(appDataDir, profileId, policy),
+  };
   const sessions: SessionService = sessionManager;
 
   const server = serve({
@@ -66,6 +81,7 @@ async function main(): Promise<void> {
       allowedOrigin,
       chromeInstaller,
       profiles,
+      profilePolicies,
       sessions,
       tasks,
       steps: { listByTask: (taskId) => steps.list(taskId) },

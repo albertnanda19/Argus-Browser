@@ -92,6 +92,14 @@ function createHarness(initial: ProviderConfig = unconfigured) {
       clearLocalBinary: async () => readyState,
     },
     profiles,
+    profilePolicies: {
+      get: async () => {
+        throw new Error("Unused profile policy lookup.");
+      },
+      set: async () => {
+        throw new Error("Unused profile policy update.");
+      },
+    },
     sessions,
     tasks: createTaskManager({ sessions, events, now: () => new Date(fixedNow) }),
     steps: { listByTask: () => [] },

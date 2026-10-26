@@ -326,6 +326,14 @@ function createAppHarness(
       }),
       clearLocalBinary: async () => readyState,
     },
+    profilePolicies: {
+      get: async () => {
+        throw new Error("Unused profile policy lookup.");
+      },
+      set: async () => {
+        throw new Error("Unused profile policy update.");
+      },
+    },
     profiles: {
       list: async () => [],
       create: async (name: string) => ({

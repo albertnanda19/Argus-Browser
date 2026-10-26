@@ -65,6 +65,14 @@ function createHarness() {
       clearLocalBinary: async () => readyState,
     },
     profiles,
+    profilePolicies: {
+      get: async () => {
+        throw new Error("Unused profile policy lookup.");
+      },
+      set: async () => {
+        throw new Error("Unused profile policy update.");
+      },
+    },
     sessions,
     tasks: createTaskManager({ sessions, events, now: () => new Date(now) }),
     steps: { listByTask: () => [] },
@@ -127,7 +135,7 @@ describe("GET /v1/openapi.json", () => {
     );
 
     expect(body.openapi).toBe("3.1.0");
-    expect(operationCount).toBe(22);
+    expect(operationCount).toBe(24);
   });
 
   it("builds the document once when the app is created", async () => {

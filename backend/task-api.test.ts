@@ -80,6 +80,14 @@ function createHarness() {
       clearLocalBinary: async () => readyState,
     },
     profiles: profilesService,
+    profilePolicies: {
+      get: async () => {
+        throw new Error("Unused profile policy lookup.");
+      },
+      set: async () => {
+        throw new Error("Unused profile policy update.");
+      },
+    },
     sessions: sessionsService,
     tasks,
     steps: { listByTask: () => [] },

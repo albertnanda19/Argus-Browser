@@ -2,15 +2,28 @@ import { randomBytes } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { z } from "zod";
 import {
   profileIdSchema,
   profileNameSchema,
   profileSchema,
   type Profile,
 } from "../shared/profile";
+import {
+  createDefaultProfilePolicy,
+  profilePolicySchema,
+  type ProfilePolicy,
+} from "../shared/profile-policy";
 
 const PROFILES_DIR = "profiles";
 const METADATA_FILE = "profile.json";
+
+const profileMetadataSchema = z.strictObject({
+  ...profileSchema.shape,
+  policy: profilePolicySchema.optional(),
+});
+
+type ProfileMetadata = z.infer<typeof profileMetadataSchema>;
 
 const MESSAGES = {
   notFound: "Profil tidak ditemukan.",
@@ -63,10 +76,22 @@ export function resolveProfileDir(appDataDir: string, profileId: string): string
   return profileDir;
 }
 
-async function writeProfileMetadata(profileDir: string, profile: Profile): Promise<void> {
+function toProfile(metadata: ProfileMetadata): Profile {
+  return {
+    id: metadata.id,
+    name: metadata.name,
+    createdAt: metadata.createdAt,
+    lastUsedAt: metadata.lastUsedAt,
+  };
+}
+
+async function writeProfileMetadata(
+  profileDir: string,
+  metadata: ProfileMetadata,
+): Promise<void> {
   const metadataFile = join(profileDir, METADATA_FILE);
   const tempFile = join(profileDir, `.${METADATA_FILE}-${randomBytes(4).toString("hex")}.tmp`);
-  const contents = JSON.stringify(profileSchema.parse(profile));
+  const contents = JSON.stringify(profileMetadataSchema.parse(metadata));
 
   try {
     await writeFile(tempFile, contents, { mode: 0o600 });
@@ -74,13 +99,16 @@ async function writeProfileMetadata(profileDir: string, profile: Profile): Promi
     await rename(tempFile, metadataFile);
   } catch (error) {
     await rm(tempFile, { force: true }).catch(() => {
-      console.warn(`Failed to remove temporary profile metadata: ${profile.id}`);
+      console.warn(`Failed to remove temporary profile metadata: ${metadata.id}`);
     });
     throw error;
   }
 }
 
-async function readProfileMetadata(profileDir: string, profileId: string): Promise<Profile> {
+async function readProfileMetadata(
+  profileDir: string,
+  profileId: string,
+): Promise<ProfileMetadata> {
   let stats: Stats;
   try {
     stats = await lstat(profileDir);
@@ -105,18 +133,18 @@ async function readProfileMetadata(profileDir: string, profileId: string): Promi
     throw error;
   }
 
-  let profile: Profile;
+  let metadata: ProfileMetadata;
   try {
-    profile = profileSchema.parse(JSON.parse(contents));
+    metadata = profileMetadataSchema.parse(JSON.parse(contents));
   } catch {
     throw corruptMetadataError();
   }
 
-  if (profile.id !== profileId) {
+  if (metadata.id !== profileId) {
     throw corruptMetadataError();
   }
 
-  return profile;
+  return metadata;
 }
 
 export async function createProfile(appDataDir: string, name: string): Promise<Profile> {
@@ -172,7 +200,7 @@ export async function listProfiles(appDataDir: string): Promise<Profile[]> {
 
     try {
       const profileDir = resolveProfileDir(appDataDir, entry.name);
-      profiles.push(await readProfileMetadata(profileDir, entry.name));
+      profiles.push(toProfile(await readProfileMetadata(profileDir, entry.name)));
     } catch (error) {
       if (error instanceof ProfileStoreError && error.code === "corrupt_profile_metadata") {
         console.warn(`Skipping profile with corrupt metadata: ${entry.name}`);
@@ -200,7 +228,28 @@ export async function listProfiles(appDataDir: string): Promise<Profile[]> {
 
 export async function getProfile(appDataDir: string, profileId: string): Promise<Profile> {
   const profileDir = resolveProfileDir(appDataDir, profileId);
-  return readProfileMetadata(profileDir, profileId);
+  return toProfile(await readProfileMetadata(profileDir, profileId));
+}
+
+export async function getProfilePolicy(
+  appDataDir: string,
+  profileId: string,
+): Promise<ProfilePolicy> {
+  const profileDir = resolveProfileDir(appDataDir, profileId);
+  const metadata = await readProfileMetadata(profileDir, profileId);
+  return metadata.policy ?? createDefaultProfilePolicy();
+}
+
+export async function setProfilePolicy(
+  appDataDir: string,
+  profileId: string,
+  policy: ProfilePolicy,
+): Promise<ProfilePolicy> {
+  const profileDir = resolveProfileDir(appDataDir, profileId);
+  const metadata = await readProfileMetadata(profileDir, profileId);
+  const parsedPolicy = profilePolicySchema.parse(policy);
+  await writeProfileMetadata(profileDir, { ...metadata, policy: parsedPolicy });
+  return parsedPolicy;
 }
 
 export async function deleteProfile(appDataDir: string, profileId: string): Promise<void> {
@@ -229,8 +278,8 @@ export async function updateLastUsedAt(
   usedAt: Date = new Date(),
 ): Promise<Profile> {
   const profileDir = resolveProfileDir(appDataDir, profileId);
-  const profile = await readProfileMetadata(profileDir, profileId);
-  const updated: Profile = { ...profile, lastUsedAt: usedAt.toISOString() };
+  const metadata = await readProfileMetadata(profileDir, profileId);
+  const updated: ProfileMetadata = { ...metadata, lastUsedAt: usedAt.toISOString() };
   await writeProfileMetadata(profileDir, updated);
-  return updated;
+  return toProfile(updated);
 }

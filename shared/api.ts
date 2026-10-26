@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { chromeInstallerStateSchema } from "./chrome-installer";
 import { profileIdSchema, profileNameSchema, profileSchema } from "./profile";
+import { profilePolicySchema } from "./profile-policy";
 import { sessionSchema } from "./session";
 import { approvalSchema, jsonObjectSchema, taskSchema } from "./task";
 
@@ -49,6 +50,12 @@ export const profileListResponseSchema = z.strictObject({
 });
 
 export type ProfileListResponse = z.infer<typeof profileListResponseSchema>;
+
+export const profilePolicyResponseSchema = z.strictObject({
+  data: profilePolicySchema,
+});
+
+export type ProfilePolicyResponse = z.infer<typeof profilePolicyResponseSchema>;
 
 export const sessionResponseSchema = z.strictObject({
   data: sessionSchema,
