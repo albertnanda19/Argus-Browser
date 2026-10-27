@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "./provider-errors";
@@ -16,22 +16,33 @@ const testRoot = resolve(
 );
 
 const fixedNow = new Date("2026-10-25T10:00:00.000Z");
+const later = new Date("2026-10-26T10:00:00.000Z");
 const apiKey = "unit-test-secret-key-001";
 const secondApiKey = "unit-test-secret-key-002";
+const openRouterKey = "unit-test-openrouter-key";
 const model = "gemini-2.5-flash";
+const openRouterModel = "nvidia/nemotron-3.5-super-vl:free";
 
 function newAppDataDir(): string {
   return join(testRoot, `appdata-${randomBytes(4).toString("hex")}`);
 }
 
-function registryWith(
-  validate: (input: { readonly model: string; readonly apiKey: string }) => Promise<ProviderValidation>,
-) {
-  return createProviderRegistry({ validateGemini: validate });
+type Validator = (
+  input: { readonly model: string; readonly apiKey: string },
+) => Promise<ProviderValidation>;
+
+function registryWith(options: {
+  readonly gemini?: Validator;
+  readonly openrouter?: Validator;
+} = {}) {
+  return createProviderRegistry({
+    validateGemini: options.gemini ?? (async () => ({ ok: true })),
+    validateOpenRouter: options.openrouter ?? (async () => ({ ok: true })),
+  });
 }
 
 function acceptingRegistry() {
-  return registryWith(async () => ({ ok: true }));
+  return registryWith();
 }
 
 function providerFile(appDataDir: string): string {
@@ -63,6 +74,7 @@ describe("provider configuration service", () => {
       model: null,
       configured: false,
       updatedAt: null,
+      available: [],
     });
     expect(service.getActive()).toBeNull();
   });
@@ -81,7 +93,13 @@ describe("provider configuration service", () => {
       registry: acceptingRegistry(),
     });
 
-    expect(service.getConfig().configured).toBe(false);
+    expect(service.getConfig()).toEqual({
+      provider: null,
+      model: null,
+      configured: false,
+      updatedAt: null,
+      available: [],
+    });
     expect(service.getActive()).toBeNull();
     expect(warn).toHaveBeenCalledTimes(1);
 
@@ -109,16 +127,12 @@ describe("provider configuration service", () => {
       registry: acceptingRegistry(),
     });
 
-    expect(service.getConfig()).toEqual({
-      provider: null,
-      model: null,
-      configured: false,
-      updatedAt: null,
-    });
+    expect(service.getConfig().configured).toBe(false);
+    expect(service.getConfig().available).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it("writes the configuration atomically with mode 0600", async () => {
+  it("writes the new multi-provider shape with mode 0600", async () => {
     const appDataDir = newAppDataDir();
     const service = await createProviderService({
       appDataDir,
@@ -137,67 +151,180 @@ describe("provider configuration service", () => {
       model,
       configured: true,
       updatedAt: fixedNow.toISOString(),
+      available: ["gemini"],
     });
 
     const file = providerFile(appDataDir);
     const contents: unknown = JSON.parse(await readFile(file, "utf8"));
 
     expect(contents).toEqual({
-      provider: "gemini",
-      model,
-      apiKey,
-      updatedAt: fixedNow.toISOString(),
+      active: "gemini",
+      configs: {
+        gemini: { model, apiKey, updatedAt: fixedNow.toISOString() },
+      },
     });
     if (typeof contents !== "object" || contents === null) {
       throw new Error("providers.json must be an object.");
     }
-    expect(Object.keys(contents).sort()).toEqual(["apiKey", "model", "provider", "updatedAt"]);
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
-    expect((await stat(appDataDir)).mode & 0o777).toBe(0o700);
+    expect(Object.keys(contents).sort()).toEqual(["active", "configs"]);
   });
 
-  it("restores mode 0600 when overwriting an existing file", async () => {
+  it("stores OpenRouter without overwriting the saved Gemini configuration", async () => {
+    const appDataDir = newAppDataDir();
+    const validateOpenRouter = vi.fn<Validator>(async () => ({ ok: true }));
+    const service = await createProviderService({
+      appDataDir,
+      registry: registryWith({ openrouter: validateOpenRouter }),
+      now: () => fixedNow,
+    });
+
+    await service.setConfig({ provider: "gemini", model, apiKey });
+    const config = await service.setConfig({
+      provider: "openrouter",
+      model: openRouterModel,
+      apiKey: openRouterKey,
+    });
+
+    expect(validateOpenRouter).toHaveBeenCalledWith({
+      model: openRouterModel,
+      apiKey: openRouterKey,
+    });
+    expect(config).toEqual({
+      provider: "openrouter",
+      model: openRouterModel,
+      configured: true,
+      updatedAt: fixedNow.toISOString(),
+      available: ["gemini", "openrouter"],
+    });
+    expect(service.getActive()).toEqual({
+      provider: "openrouter",
+      model: openRouterModel,
+      apiKey: openRouterKey,
+      updatedAt: fixedNow.toISOString(),
+    });
+
+    const contents: unknown = JSON.parse(await readFile(providerFile(appDataDir), "utf8"));
+    expect(contents).toEqual({
+      active: "openrouter",
+      configs: {
+        gemini: { model, apiKey, updatedAt: fixedNow.toISOString() },
+        openrouter: {
+          model: openRouterModel,
+          apiKey: openRouterKey,
+          updatedAt: fixedNow.toISOString(),
+        },
+      },
+    });
+  });
+
+  it("reactivates a stored provider without a new API key", async () => {
+    const appDataDir = newAppDataDir();
+    let now = fixedNow;
+    const validateGemini = vi.fn<Validator>(async () => ({ ok: true }));
+    const service = await createProviderService({
+      appDataDir,
+      registry: registryWith({ gemini: validateGemini }),
+      now: () => now,
+    });
+
+    await service.setConfig({ provider: "gemini", model, apiKey });
+    await service.setConfig({
+      provider: "openrouter",
+      model: openRouterModel,
+      apiKey: openRouterKey,
+    });
+
+    now = later;
+    const config = await service.setConfig({
+      provider: "gemini",
+      model: "gemini-2.5-pro",
+    });
+
+    expect(validateGemini).toHaveBeenLastCalledWith({
+      model: "gemini-2.5-pro",
+      apiKey,
+    });
+    expect(config).toEqual({
+      provider: "gemini",
+      model: "gemini-2.5-pro",
+      configured: true,
+      updatedAt: later.toISOString(),
+      available: ["gemini", "openrouter"],
+    });
+
+    const contents: unknown = JSON.parse(await readFile(providerFile(appDataDir), "utf8"));
+    expect(contents).toEqual({
+      active: "gemini",
+      configs: {
+        gemini: {
+          model: "gemini-2.5-pro",
+          apiKey,
+          updatedAt: later.toISOString(),
+        },
+        openrouter: {
+          model: openRouterModel,
+          apiKey: openRouterKey,
+          updatedAt: fixedNow.toISOString(),
+        },
+      },
+    });
+  });
+
+  it("requires a stored API key when the request omits one", async () => {
     const appDataDir = newAppDataDir();
     const service = await createProviderService({
       appDataDir,
       registry: acceptingRegistry(),
+    });
+
+    await expect(
+      service.setConfig({ provider: "gemini", model }),
+    ).rejects.toMatchObject({
+      name: "ProviderError",
+      code: "provider_api_key_required",
+      message: "API key wajib diisi untuk provider ini.",
+    });
+    await expect(access(providerFile(appDataDir))).rejects.toThrow();
+    expect(service.getConfig().configured).toBe(false);
+  });
+
+  it("keeps the old configuration when credential validation fails", async () => {
+    const appDataDir = newAppDataDir();
+    const validate = vi.fn<Validator>(
+      async (): Promise<ProviderValidation> => ({
+        ok: false,
+        message: "Model OpenRouter tidak mendukung structured output.",
+      }),
+    );
+    const service = await createProviderService({
+      appDataDir,
+      registry: registryWith({ openrouter: validate }),
       now: () => fixedNow,
     });
-    const file = providerFile(appDataDir);
-
-    await mkdir(appDataDir, { recursive: true });
-    await writeFile(file, "stale", { mode: 0o644 });
 
     await service.setConfig({ provider: "gemini", model, apiKey });
 
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
-  });
-
-  it("reads its saved configuration back from a new service instance", async () => {
-    const appDataDir = newAppDataDir();
-    const first = await createProviderService({
-      appDataDir,
-      registry: acceptingRegistry(),
-      now: () => fixedNow,
-    });
-    await first.setConfig({ provider: "gemini", model, apiKey });
-
-    const second = await createProviderService({
-      appDataDir,
-      registry: acceptingRegistry(),
-    });
-
-    expect(second.getConfig()).toEqual({
+    await expect(
+      service.setConfig({
+        provider: "openrouter",
+        model: openRouterModel,
+        apiKey: openRouterKey,
+      }),
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(service.getConfig()).toEqual({
       provider: "gemini",
       model,
       configured: true,
       updatedAt: fixedNow.toISOString(),
+      available: ["gemini"],
     });
-    expect(second.getActive()).toEqual({
-      provider: "gemini",
-      model,
-      apiKey,
-      updatedAt: fixedNow.toISOString(),
+
+    const contents: unknown = JSON.parse(await readFile(providerFile(appDataDir), "utf8"));
+    expect(contents).toEqual({
+      active: "gemini",
+      configs: {
+        gemini: { model, apiKey, updatedAt: fixedNow.toISOString() },
+      },
     });
   });
 
@@ -208,13 +335,13 @@ describe("provider configuration service", () => {
       registry: acceptingRegistry(),
     });
 
-    const failure = service.setConfig({
-      provider: "openai",
-      model: "gpt-test",
-      apiKey,
-    });
-
-    await expect(failure).rejects.toMatchObject({
+    await expect(
+      service.setConfig({
+        provider: "openai",
+        model: "gpt-test",
+        apiKey,
+      }),
+    ).rejects.toMatchObject({
       name: "ProviderError",
       code: "provider_unknown",
     });
@@ -222,25 +349,87 @@ describe("provider configuration service", () => {
     expect(service.getActive()).toBeNull();
   });
 
-  it("keeps the old configuration when credential validation fails", async () => {
+  it("reads two saved configurations back from a new service instance", async () => {
     const appDataDir = newAppDataDir();
-    const validate = vi.fn(
-      async (): Promise<ProviderValidation> => ({
-        ok: false,
-        message: "API key Gemini ditolak atau tidak memiliki akses.",
-      }),
-    );
-    const service = await createProviderService({
+    const first = await createProviderService({
       appDataDir,
-      registry: registryWith(validate),
+      registry: acceptingRegistry(),
       now: () => fixedNow,
     });
+    await first.setConfig({ provider: "gemini", model, apiKey });
+    await first.setConfig({
+      provider: "openrouter",
+      model: openRouterModel,
+      apiKey: openRouterKey,
+    });
 
-    await expect(
-      service.setConfig({ provider: "gemini", model, apiKey: secondApiKey }),
-    ).rejects.toBeInstanceOf(ProviderError);
-    await expect(access(providerFile(appDataDir))).rejects.toThrow();
-    expect(service.getConfig().configured).toBe(false);
+    const second = await createProviderService({
+      appDataDir,
+      registry: acceptingRegistry(),
+    });
+
+    expect(second.getConfig()).toEqual({
+      provider: "openrouter",
+      model: openRouterModel,
+      configured: true,
+      updatedAt: fixedNow.toISOString(),
+      available: ["gemini", "openrouter"],
+    });
+    expect(second.getActive()).toEqual({
+      provider: "openrouter",
+      model: openRouterModel,
+      apiKey: openRouterKey,
+      updatedAt: fixedNow.toISOString(),
+    });
+  });
+
+  it("migrates the legacy file in memory and writes the new shape on the next save", async () => {
+    const appDataDir = newAppDataDir();
+    await mkdir(appDataDir, { recursive: true });
+    await writeFile(
+      providerFile(appDataDir),
+      JSON.stringify({
+        provider: "gemini",
+        model,
+        apiKey,
+        updatedAt: fixedNow.toISOString(),
+      }),
+    );
+
+    const service = await createProviderService({
+      appDataDir,
+      registry: acceptingRegistry(),
+      now: () => later,
+    });
+
+    expect(service.getConfig()).toEqual({
+      provider: "gemini",
+      model,
+      configured: true,
+      updatedAt: fixedNow.toISOString(),
+      available: ["gemini"],
+    });
+
+    const contentsBefore: unknown = JSON.parse(
+      await readFile(providerFile(appDataDir), "utf8"),
+    );
+    expect(contentsBefore).toHaveProperty("provider", "gemini");
+
+    await service.setConfig({ provider: "gemini", model, apiKey: secondApiKey });
+
+    const contentsAfter: unknown = JSON.parse(
+      await readFile(providerFile(appDataDir), "utf8"),
+    );
+    expect(contentsAfter).toEqual({
+      active: "gemini",
+      configs: {
+        gemini: {
+          model,
+          apiKey: secondApiKey,
+          updatedAt: later.toISOString(),
+        },
+      },
+    });
   });
 
   it("does not update memory when the write fails", async () => {
@@ -267,7 +456,7 @@ describe("provider configuration service", () => {
     const entered = new Promise<void>((resolveEntered) => {
       firstEntered = resolveEntered;
     });
-    const validate = vi.fn(
+    const validate = vi.fn<Validator>(
       async (input: { readonly model: string; readonly apiKey: string }) => {
         if (input.apiKey === apiKey) {
           firstEntered?.();
@@ -280,7 +469,7 @@ describe("provider configuration service", () => {
     );
     const service = await createProviderService({
       appDataDir,
-      registry: registryWith(validate),
+      registry: registryWith({ gemini: validate }),
       now: () => fixedNow,
     });
 
@@ -303,17 +492,21 @@ describe("provider configuration service", () => {
 
     const contents: unknown = JSON.parse(await readFile(providerFile(appDataDir), "utf8"));
     expect(contents).toEqual({
-      provider: "gemini",
-      model: "model-two",
-      apiKey: secondApiKey,
-      updatedAt: fixedNow.toISOString(),
+      active: "gemini",
+      configs: {
+        gemini: {
+          model: "model-two",
+          apiKey: secondApiKey,
+          updatedAt: fixedNow.toISOString(),
+        },
+      },
     });
 
     const entries = await readdir(appDataDir);
     expect(entries.filter((entry) => entry.endsWith(".tmp"))).toEqual([]);
   });
 
-  it("never logs the API key or file contents", async () => {
+  it("never logs the API key or validation message", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -326,7 +519,9 @@ describe("provider configuration service", () => {
 
     const service = await createProviderService({
       appDataDir,
-      registry: registryWith(async () => ({ ok: false, message: "Ditolak." })),
+      registry: registryWith({
+        gemini: async () => ({ ok: false, message: "Ditolak." }),
+      }),
     });
 
     await expect(

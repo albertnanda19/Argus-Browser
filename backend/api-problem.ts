@@ -93,6 +93,9 @@ export function knownProblem(
   }
 
   if (error instanceof ProviderError) {
+    if (error.code === "provider_api_key_required") {
+      return { status: 400, detail: error.message };
+    }
     return { status: 422, detail: error.message };
   }
 

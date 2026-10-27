@@ -146,6 +146,7 @@ const providerConfig: ProviderConfig = {
   model: "gemini-2.5-flash",
   configured: true,
   updatedAt: timestamp,
+  available: ["gemini"],
 };
 
 const providerRequest: ProviderConfigRequest = {
@@ -474,6 +475,22 @@ describe("createArgusClient", () => {
       "sessions",
       "tasks",
     ]);
+  });
+
+  it("allows reactivating a stored provider without an API key", async () => {
+    const stub = createFetchStub(() => jsonResponse({ data: providerConfig }));
+    const client = createClient(stub.fetch);
+
+    await client.providers.set({
+      provider: "gemini",
+      model: "gemini-2.5-pro",
+    });
+
+    const call = stub.calls[0];
+    expect(JSON.parse(String(call?.init?.body))).toEqual({
+      provider: "gemini",
+      model: "gemini-2.5-pro",
+    });
   });
 
   it("sends JSON bodies only for endpoints that take input", async () => {

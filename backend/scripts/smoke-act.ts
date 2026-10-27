@@ -208,10 +208,11 @@ function createSmokeProviders(model: string, apiKey: string): ProviderService {
 
   return {
     getConfig: () => ({
-      provider: config.provider,
+      provider: "gemini",
       model: config.model,
       configured: true,
       updatedAt: config.updatedAt,
+      available: ["gemini"],
     }),
     getActive: () => ({ ...config }),
     async setConfig() {

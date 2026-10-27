@@ -5,6 +5,7 @@ import type { ProviderConfig } from "../shared/provider";
 import type { ProviderAdapter, ProviderRegistry } from "./provider-registry";
 import type { ProviderService } from "./provider-service";
 import type { StoredProviderConfig } from "./provider-store";
+import { createOpenRouterGenerate } from "./openrouter-provider";
 import type {
   AgentAction,
   StagehandExtractSchema,
@@ -32,12 +33,19 @@ function createProviderService(getActive: () => StoredProviderConfig | null): Pr
     getConfig(): ProviderConfig {
       const active = getActive();
       return active === null
-        ? { provider: null, model: null, configured: false, updatedAt: null }
+        ? {
+            provider: null,
+            model: null,
+            configured: false,
+            updatedAt: null,
+            available: [],
+          }
         : {
             provider: active.provider,
             model: active.model,
             configured: true,
             updatedAt: active.updatedAt,
+            available: [active.provider],
           };
     },
     getActive,
@@ -49,7 +57,22 @@ function createProviderService(getActive: () => StoredProviderConfig | null): Pr
 
 const geminiAdapter: ProviderAdapter = {
   id: "gemini",
-  toStagehandModelName: (model) => `google/${model}`,
+  createModelConfig: ({ model, apiKey }) => ({
+    kind: "native",
+    modelName: `google/${model}`,
+    apiKey,
+  }),
+  async validateCredentials() {
+    return { ok: true };
+  },
+};
+
+const openRouterAdapter: ProviderAdapter = {
+  id: "openrouter",
+  createModelConfig: ({ model, apiKey }) => ({
+    kind: "client",
+    generate: createOpenRouterGenerate({ model, apiKey }),
+  }),
   async validateCredentials() {
     return { ok: true };
   },
@@ -176,10 +199,38 @@ describe("createStagehandAgent", () => {
     expect(fixture.runtimeOptions).toEqual([
       {
         cdpUrl: FAKE_CDP_URL,
-        modelName: "google/gemini-2.5-flash",
-        apiKey: FAKE_API_KEY,
+        model: {
+          kind: "native",
+          modelName: "google/gemini-2.5-flash",
+          apiKey: FAKE_API_KEY,
+        },
       },
     ]);
+
+    await agent.close();
+  });
+
+  it("passes an OpenRouter client callback without exposing the key", async () => {
+    const fixture = createFixture({
+      getActive: () =>
+        activeConfig({
+          provider: "openrouter",
+          model: "nvidia/nemotron-3.5-super-vl:free",
+        }),
+      adapter: openRouterAdapter,
+    });
+
+    const agent = await fixture.createAgent();
+    const options = fixture.runtimeOptions[0];
+
+    expect(options?.cdpUrl).toBe(FAKE_CDP_URL);
+    expect(options?.model.kind).toBe("client");
+    if (options?.model.kind !== "client") {
+      throw new Error("Expected a client model config.");
+    }
+    expect(typeof options.model.generate).toBe("function");
+    expect(Object.keys(options.model).sort()).toEqual(["generate", "kind"]);
+    expect(JSON.stringify(options.model)).not.toContain(FAKE_API_KEY);
 
     await agent.close();
   });
@@ -197,8 +248,22 @@ describe("createStagehandAgent", () => {
     const second = await fixture.createAgent();
 
     expect(fixture.runtimeOptions).toEqual([
-      { cdpUrl: FAKE_CDP_URL, modelName: "google/gemini-2.5-flash", apiKey: "first-key" },
-      { cdpUrl: FAKE_CDP_URL, modelName: "google/gemini-2.5-pro", apiKey: "second-key" },
+      {
+        cdpUrl: FAKE_CDP_URL,
+        model: {
+          kind: "native",
+          modelName: "google/gemini-2.5-flash",
+          apiKey: "first-key",
+        },
+      },
+      {
+        cdpUrl: FAKE_CDP_URL,
+        model: {
+          kind: "native",
+          modelName: "google/gemini-2.5-pro",
+          apiKey: "second-key",
+        },
+      },
     ]);
 
     await first.close();

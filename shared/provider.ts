@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const providerIdSchema = z.enum(["gemini"]);
+export const providerIdSchema = z.enum(["gemini", "openrouter"]);
 
 export type ProviderId = z.infer<typeof providerIdSchema>;
 
@@ -15,6 +15,7 @@ export const providerConfigSchema = z.strictObject({
   model: providerModelSchema.nullable(),
   configured: z.boolean(),
   updatedAt: z.iso.datetime({ offset: false }).nullable(),
+  available: z.array(providerIdSchema),
 });
 
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
@@ -22,7 +23,7 @@ export type ProviderConfig = z.infer<typeof providerConfigSchema>;
 export const providerConfigRequestSchema = z.strictObject({
   provider: providerKeySchema,
   model: providerModelSchema,
-  apiKey: providerApiKeySchema,
+  apiKey: providerApiKeySchema.optional(),
 });
 
 export type ProviderConfigRequest = z.infer<typeof providerConfigRequestSchema>;
@@ -36,6 +37,7 @@ export type ProviderResponse = z.infer<typeof providerResponseSchema>;
 export const providerErrorCodeSchema = z.enum([
   "provider_unknown",
   "provider_validation_failed",
+  "provider_api_key_required",
 ]);
 
 export type ProviderErrorCode = z.infer<typeof providerErrorCodeSchema>;

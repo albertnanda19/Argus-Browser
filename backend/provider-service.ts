@@ -1,7 +1,9 @@
 import {
   providerConfigRequestSchema,
+  providerIdSchema,
   type ProviderConfig,
   type ProviderConfigRequest,
+  type ProviderId,
 } from "../shared/provider";
 import { ProviderError } from "./provider-errors";
 import type { ProviderRegistry } from "./provider-registry";
@@ -9,6 +11,8 @@ import {
   readStoredProviderConfig,
   writeStoredProviderConfig,
   type StoredProviderConfig,
+  type StoredProviderEntry,
+  type StoredProviderFile,
 } from "./provider-store";
 
 export type ProviderService = {
@@ -23,17 +27,49 @@ export type ProviderServiceOptions = {
   readonly now?: () => Date;
 };
 
-function toPublicConfig(config: StoredProviderConfig | null): ProviderConfig {
-  if (config === null) {
-    return { provider: null, model: null, configured: false, updatedAt: null };
+function availableProviders(state: StoredProviderFile | null): ProviderId[] {
+  if (state === null) {
+    return [];
   }
 
+  return providerIdSchema.options.filter(
+    (id) => state.configs[id] !== undefined,
+  );
+}
+
+function toPublicConfig(state: StoredProviderFile | null): ProviderConfig {
+  if (state === null) {
+    return {
+      provider: null,
+      model: null,
+      configured: false,
+      updatedAt: null,
+      available: [],
+    };
+  }
+
+  const entry = state.configs[state.active];
+
   return {
-    provider: config.provider,
-    model: config.model,
-    configured: true,
-    updatedAt: config.updatedAt,
+    provider: state.active,
+    model: entry?.model ?? null,
+    configured: entry !== undefined,
+    updatedAt: entry?.updatedAt ?? null,
+    available: availableProviders(state),
   };
+}
+
+function toActiveConfig(state: StoredProviderFile | null): StoredProviderConfig | null {
+  if (state === null) {
+    return null;
+  }
+
+  const entry = state.configs[state.active];
+  if (entry === undefined) {
+    return null;
+  }
+
+  return { provider: state.active, ...entry };
 }
 
 export async function createProviderService(
@@ -45,13 +81,13 @@ export async function createProviderService(
     console.warn("Provider configuration is invalid; treating as unconfigured.");
   }
 
-  let active = read.status === "ok" ? read.config : null;
+  let state = read.status === "ok" ? read.config : null;
   let writeTail: Promise<unknown> = Promise.resolve();
   const now = options.now ?? (() => new Date());
 
   return {
-    getConfig: () => toPublicConfig(active),
-    getActive: () => (active === null ? null : { ...active }),
+    getConfig: () => toPublicConfig(state),
+    getActive: () => toActiveConfig(state),
     setConfig(input) {
       const run = async (): Promise<ProviderConfig> => {
         const request = providerConfigRequestSchema.parse(input);
@@ -61,25 +97,35 @@ export async function createProviderService(
           throw new ProviderError("provider_unknown");
         }
 
+        const stored = state?.configs[adapter.id];
+        const apiKey = request.apiKey ?? stored?.apiKey;
+
+        if (apiKey === undefined) {
+          throw new ProviderError("provider_api_key_required");
+        }
+
         const validation = await adapter.validateCredentials({
           model: request.model,
-          apiKey: request.apiKey,
+          apiKey,
         });
 
         if (!validation.ok) {
           throw new ProviderError("provider_validation_failed", validation.message);
         }
 
-        const stored: StoredProviderConfig = {
-          provider: adapter.id,
+        const entry: StoredProviderEntry = {
           model: request.model,
-          apiKey: request.apiKey,
+          apiKey,
           updatedAt: now().toISOString(),
         };
+        const next: StoredProviderFile = {
+          active: adapter.id,
+          configs: { ...state?.configs, [adapter.id]: entry },
+        };
 
-        await writeStoredProviderConfig(options.appDataDir, stored);
-        active = stored;
-        return toPublicConfig(stored);
+        await writeStoredProviderConfig(options.appDataDir, next);
+        state = next;
+        return toPublicConfig(next);
       };
 
       const current = writeTail.catch(() => undefined).then(run);

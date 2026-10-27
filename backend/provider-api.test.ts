@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
-import type { ProviderConfig, ProviderConfigRequest } from "../shared/provider";
+import {
+  providerIdSchema,
+  type ProviderConfig,
+  type ProviderConfigRequest,
+  type ProviderId,
+} from "../shared/provider";
 import type { Session } from "../shared/session";
 import { createApp, type ProfileService, type SessionService } from "./app";
 import { createEventBus } from "./event-bus";
@@ -19,6 +24,7 @@ const unconfigured: ProviderConfig = {
   model: null,
   configured: false,
   updatedAt: null,
+  available: [],
 };
 
 const configured: ProviderConfig = {
@@ -26,6 +32,7 @@ const configured: ProviderConfig = {
   model: "gemini-2.5-flash",
   configured: true,
   updatedAt: fixedNow,
+  available: ["gemini"],
 };
 
 const readyState: ChromeInstallerState = {
@@ -72,11 +79,15 @@ function createHarness(initial: ProviderConfig = unconfigured) {
   const providers: ProvidersStub = {
     getConfig: vi.fn(() => config),
     setConfig: vi.fn(async (input) => {
+      const provider = providerIdSchema.parse(input.provider);
+      const available = new Set<ProviderId>(config.available);
+      available.add(provider);
       config = {
-        provider: "gemini",
+        provider,
         model: input.model,
         configured: true,
         updatedAt: fixedNow,
+        available: providerIdSchema.options.filter((id) => available.has(id)),
       };
       return config;
     }),
@@ -152,6 +163,7 @@ describe("GET /v1/providers", () => {
     expect(response.status).toBe(200);
     expect(body).toEqual({ data: configured });
     expect(Object.keys(body.data).sort()).toEqual([
+      "available",
       "configured",
       "model",
       "provider",
@@ -186,6 +198,7 @@ describe("PUT /v1/providers", () => {
     expect(body.data).toEqual(configured);
     expect(JSON.stringify(body)).not.toContain(apiKey);
     expect(Object.keys(body.data).sort()).toEqual([
+      "available",
       "configured",
       "model",
       "provider",
@@ -195,6 +208,77 @@ describe("PUT /v1/providers", () => {
       provider: "gemini",
       model: "gemini-2.5-flash",
       apiKey,
+    });
+  });
+
+  it("stores OpenRouter next to the saved Gemini configuration", async () => {
+    const { app, providers } = createHarness(configured);
+    const response = await app.request(
+      "/v1/providers",
+      jsonBody("PUT", {
+        provider: "openrouter",
+        model: "nvidia/nemotron-3.5-super-vl:free",
+        apiKey,
+      }),
+    );
+    const body = (await response.json()) as { data: ProviderConfig };
+
+    expect(response.status).toBe(200);
+    expect(body.data).toEqual({
+      provider: "openrouter",
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      configured: true,
+      updatedAt: fixedNow,
+      available: ["gemini", "openrouter"],
+    });
+    expect(JSON.stringify(body)).not.toContain(apiKey);
+    expect(providers.setConfig).toHaveBeenCalledWith({
+      provider: "openrouter",
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      apiKey,
+    });
+  });
+
+  it("reactivates a stored provider without an apiKey", async () => {
+    const { app, providers } = createHarness(configured);
+    const response = await app.request(
+      "/v1/providers",
+      jsonBody("PUT", { provider: "gemini", model: "gemini-2.5-pro" }),
+    );
+    const body = (await response.json()) as { data: ProviderConfig };
+
+    expect(response.status).toBe(200);
+    expect(body.data).toEqual({
+      provider: "gemini",
+      model: "gemini-2.5-pro",
+      configured: true,
+      updatedAt: fixedNow,
+      available: ["gemini"],
+    });
+    expect(providers.setConfig).toHaveBeenCalledWith({
+      provider: "gemini",
+      model: "gemini-2.5-pro",
+      apiKey: undefined,
+    });
+  });
+
+  it("requires an API key when the provider has none stored", async () => {
+    const { app, providers } = createHarness();
+    providers.setConfig = vi.fn(async () => {
+      throw new ProviderError("provider_api_key_required");
+    });
+    const response = await app.request(
+      "/v1/providers",
+      jsonBody("PUT", { provider: "gemini", model: "gemini-2.5-flash" }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toContain("application/problem+json");
+    await expect(response.json()).resolves.toEqual({
+      type: "about:blank",
+      title: "Bad Request",
+      status: 400,
+      detail: "API key wajib diisi untuk provider ini.",
     });
   });
 

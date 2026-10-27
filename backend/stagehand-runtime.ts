@@ -1,4 +1,20 @@
+import type { ClientLLM } from "@browserbasehq/stagehand" with {
+  "resolution-mode": "import",
+};
 import type { z } from "zod";
+
+export type ClientModelGenerate = ClientLLM["generate"];
+
+export type StagehandModelConfig =
+  | {
+      readonly kind: "native";
+      readonly modelName: `google/${string}`;
+      readonly apiKey: string;
+    }
+  | {
+      readonly kind: "client";
+      readonly generate: ClientModelGenerate;
+    };
 
 export type AgentAction = {
   readonly selector: string;
@@ -22,8 +38,7 @@ type StagehandZodSchema = Parameters<StagehandInstance["extract"]>[1];
 
 export type StagehandRuntimeOptions = {
   readonly cdpUrl: string;
-  readonly modelName: string;
-  readonly apiKey: string;
+  readonly model: StagehandModelConfig;
 };
 
 export type StagehandExtractOptions = {
@@ -187,12 +202,10 @@ function isStagehandZodSchema(value: unknown): value is StagehandZodSchema {
   );
 }
 
-function toStagehandModelName(value: string): `google/${string}` {
-  const prefix = "google/";
-  if (!value.startsWith(prefix) || value.length === prefix.length) {
-    throw new Error("The Stagehand runtime only supports Google model names.");
-  }
-  return `google/${value.slice(prefix.length)}`;
+function toStagehandModel(model: StagehandModelConfig) {
+  return model.kind === "native"
+    ? { modelName: model.modelName, apiKey: model.apiKey }
+    : { generate: model.generate };
 }
 
 export const createStagehandRuntime: StagehandRuntimeFactory = async (options) => {
@@ -200,10 +213,7 @@ export const createStagehandRuntime: StagehandRuntimeFactory = async (options) =
   const browser = await localBrowser.connect({ cdpUrl: options.cdpUrl });
   const stagehand = await Stagehand.create({
     browser,
-    model: {
-      modelName: toStagehandModelName(options.modelName),
-      apiKey: options.apiKey,
-    },
+    model: toStagehandModel(options.model),
     logging: { level: "off" },
   });
 

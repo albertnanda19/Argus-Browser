@@ -77,6 +77,7 @@ const providers: ProviderService = {
     model: activeProvider.model,
     configured: true,
     updatedAt: fixedNow,
+    available: ["gemini"],
   }),
   getActive: () => ({ ...activeProvider }),
   setConfig: async () => ({
@@ -84,6 +85,7 @@ const providers: ProviderService = {
     model: activeProvider.model,
     configured: true,
     updatedAt: fixedNow,
+    available: ["gemini"],
   }),
 };
 

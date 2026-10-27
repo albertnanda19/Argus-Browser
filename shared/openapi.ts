@@ -322,7 +322,7 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
   "/providers": {
     get: {
       operationId: "getProviderConfig",
-      summary: "Konfigurasi provider model aktif",
+      summary: "Konfigurasi provider aktif dan provider tersedia",
       tags: ["Providers"],
       responses: {
         "200": jsonResponse("Konfigurasi provider tanpa API key.", "ProviderResponse"),
@@ -331,7 +331,7 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
     },
     put: {
       operationId: "updateProviderConfig",
-      summary: "Validasi dan simpan konfigurasi provider",
+      summary: "Validasi, simpan, dan aktifkan konfigurasi provider",
       tags: ["Providers"],
       requestBody: requestBody("UpdateProviderRequest"),
       responses: {

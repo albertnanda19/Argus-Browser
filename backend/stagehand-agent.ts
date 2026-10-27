@@ -297,13 +297,15 @@ export async function createStagehandAgent(
     throw new AgentError("agent_provider_unsupported");
   }
 
-  const modelName = adapter.toStagehandModelName(active.model);
+  const model = adapter.createModelConfig({
+    model: active.model,
+    apiKey: active.apiKey,
+  });
   const createRuntime = options.createRuntime ?? createStagehandRuntime;
   const runtimePromise = runOperation(() =>
     createRuntime({
       cdpUrl: options.cdpUrl,
-      modelName,
-      apiKey: active.apiKey,
+      model,
     }),
   );
 

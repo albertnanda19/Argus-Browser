@@ -1,10 +1,22 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ClientModelGenerate } from "./stagehand-runtime";
 import {
+  createStagehandRuntime,
   prepareStagehandPage,
   probeLocatorWorld,
   unwrapExtractionResult,
   type LocatorWorldPage,
 } from "./stagehand-runtime";
+
+const stagehandMocks = vi.hoisted(() => ({
+  connect: vi.fn(async (_options: { readonly cdpUrl: string }) => ({ connected: true })),
+  create: vi.fn(async (_options: unknown) => ({})),
+}));
+
+vi.mock("@browserbasehq/stagehand", () => ({
+  localBrowser: { connect: stagehandMocks.connect },
+  Stagehand: { create: stagehandMocks.create },
+}));
 
 const PROBE_TIMEOUT_MS = 3_000;
 const RELOAD_TIMEOUT_MS = 30_000;
@@ -49,6 +61,54 @@ function createPage(options: {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+beforeEach(() => {
+  stagehandMocks.connect.mockClear();
+  stagehandMocks.create.mockClear();
+});
+
+describe("createStagehandRuntime", () => {
+  it("forwards a native model config to Stagehand.create", async () => {
+    await createStagehandRuntime({
+      cdpUrl: "http://127.0.0.1:59876",
+      model: {
+        kind: "native",
+        modelName: "google/gemini-2.5-flash",
+        apiKey: "unit-test-runtime-key",
+      },
+    });
+
+    expect(stagehandMocks.connect).toHaveBeenCalledWith({
+      cdpUrl: "http://127.0.0.1:59876",
+    });
+    expect(stagehandMocks.create).toHaveBeenCalledWith({
+      browser: { connected: true },
+      model: {
+        modelName: "google/gemini-2.5-flash",
+        apiKey: "unit-test-runtime-key",
+      },
+      logging: { level: "off" },
+    });
+  });
+
+  it("forwards a client callback to Stagehand.create without an API key", async () => {
+    const generate = (() => {
+      throw new Error("Unused client callback.");
+    }) as unknown as ClientModelGenerate;
+
+    await createStagehandRuntime({
+      cdpUrl: "http://127.0.0.1:59876",
+      model: { kind: "client", generate },
+    });
+
+    const call = stagehandMocks.create.mock.calls[0]?.[0] as
+      | { readonly model?: Record<string, unknown> }
+      | undefined;
+
+    expect(call?.model).toEqual({ generate });
+    expect(call?.model).not.toHaveProperty("apiKey");
+  });
 });
 
 describe("probeLocatorWorld", () => {

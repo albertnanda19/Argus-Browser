@@ -140,29 +140,71 @@ describe("Gemini credential validation", () => {
 });
 
 describe("provider registry", () => {
-  it("registers only Gemini and maps models for Stagehand", () => {
-    const validate = vi.fn(
+  it("registers Gemini and OpenRouter adapters with distinct model configs", () => {
+    const validateGemini = vi.fn(
       async (): Promise<ProviderValidation> => ({ ok: true }),
     );
-    const registry = createProviderRegistry({ validateGemini: validate });
-    const adapter = registry.get("gemini");
+    const validateOpenRouter = vi.fn(
+      async (): Promise<ProviderValidation> => ({ ok: true }),
+    );
+    const registry = createProviderRegistry({
+      validateGemini,
+      validateOpenRouter,
+    });
+    const gemini = registry.get("gemini");
+    const openrouter = registry.get("openrouter");
 
-    expect(adapter?.id).toBe("gemini");
-    expect(adapter?.toStagehandModelName(model)).toBe(`google/${model}`);
+    expect(gemini?.id).toBe("gemini");
+    expect(
+      gemini?.createModelConfig({ model, apiKey }),
+    ).toEqual({
+      kind: "native",
+      modelName: `google/${model}`,
+      apiKey,
+    });
+
+    expect(openrouter?.id).toBe("openrouter");
+    const modelConfig = openrouter?.createModelConfig({
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      apiKey,
+    });
+    expect(modelConfig?.kind).toBe("client");
+    if (modelConfig?.kind !== "client") {
+      throw new Error("Expected an OpenRouter client model config.");
+    }
+    expect(typeof modelConfig.generate).toBe("function");
+
     expect(registry.get("openai")).toBeNull();
-    expect(validate).not.toHaveBeenCalled();
+    expect(validateGemini).not.toHaveBeenCalled();
+    expect(validateOpenRouter).not.toHaveBeenCalled();
   });
 
-  it("uses the injected validator instead of the network", async () => {
-    const validate = vi.fn(
+  it("uses the injected validators instead of the network", async () => {
+    const validateGemini = vi.fn(
       async (): Promise<ProviderValidation> => ({ ok: false, message: "Ditolak." }),
     );
-    const registry = createProviderRegistry({ validateGemini: validate });
-    const adapter = registry.get("gemini");
+    const validateOpenRouter = vi.fn(
+      async (): Promise<ProviderValidation> => ({ ok: false, message: "Ditolak juga." }),
+    );
+    const registry = createProviderRegistry({
+      validateGemini,
+      validateOpenRouter,
+    });
 
     await expect(
-      adapter?.validateCredentials({ model, apiKey }),
+      registry.get("gemini")?.validateCredentials({ model, apiKey }),
     ).resolves.toEqual({ ok: false, message: "Ditolak." });
-    expect(validate).toHaveBeenCalledWith({ model, apiKey });
+    await expect(
+      registry.get("openrouter")?.validateCredentials({
+        model: "nvidia/nemotron-3.5-super-vl:free",
+        apiKey,
+      }),
+    ).resolves.toEqual({ ok: false, message: "Ditolak juga." });
+
+    expect(validateGemini).toHaveBeenCalledWith({ model, apiKey });
+    expect(validateOpenRouter).toHaveBeenCalledWith({
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      apiKey,
+    });
   });
 });

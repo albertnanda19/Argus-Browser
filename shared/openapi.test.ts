@@ -313,7 +313,8 @@ describe("OpenAPI document", () => {
     expect(collectRefs(schemas.ProviderResponse)).toEqual([
       "#/components/schemas/ProviderConfig",
     ]);
-    expect(requiredOf(request)).toEqual(["provider", "model", "apiKey"]);
+    expect(requiredOf(request)).toEqual(["provider", "model"]);
+    expect(requiredOf(schemas.ProviderConfig)).toContain("available");
 
     const operation = operationAt("put", "/providers");
 
