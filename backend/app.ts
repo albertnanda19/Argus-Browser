@@ -87,6 +87,7 @@ export type ProviderConfigService = {
 export type TaskRunnerApi = {
   start(taskId: string): void;
   cancel(taskId: string): void;
+  notifyApprovalDecision?(taskId: string, approve: boolean): void;
 };
 
 export type AgentStepService = {
@@ -554,6 +555,10 @@ export function createApp(options: AppOptions): Hono {
 
     try {
       const result = options.tasks.resolveApproval(parsedId.data, body.data);
+      options.runner.notifyApprovalDecision?.(
+        parsedId.data,
+        body.data.approve,
+      );
       return c.json(approvalResponseSchema.parse({ data: result }), 202);
     } catch (error) {
       return handleKnownError(c, error);

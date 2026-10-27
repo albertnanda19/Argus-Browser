@@ -78,9 +78,15 @@ function makeWaitingTask(harness: ReturnType<typeof createHarness>, key = "key-a
   harness.tasks.startTask(created.id);
   const approval = harness.tasks.requestApproval(created.id, {
     action: "send_message",
-    payload: { text: "halo" },
+    payload: {
+      selector: "#kirim",
+      highlighted: true,
+      category: "send_message",
+    },
     target: "#kirim",
-    screenshot: "data:image/jpeg;base64,AAAA",
+    selector: "#kirim",
+    highlighted: true,
+    category: "send_message",
   });
   const task = harness.tasks.getTask(created.id);
   if (task === null) {
@@ -139,13 +145,24 @@ describe("task state machine", () => {
 
     const approval = harness.tasks.requestApproval(task.id, {
       action: "send_message",
-      payload: { text: "halo" },
+      payload: {
+        selector: "#kirim",
+        highlighted: true,
+        category: "send_message",
+      },
       target: "#kirim",
-      screenshot: "data:image/jpeg;base64,AAAA",
+      selector: "#kirim",
+      highlighted: true,
+      category: "send_message",
     });
     expect(approval.id).toMatch(/^a_[0-9a-f]{16}$/);
     expect(approval.decision).toBe("pending");
     expect(approval.decidedAt).toBeNull();
+    expect(approval.payload).toEqual({
+      selector: "#kirim",
+      highlighted: true,
+      category: "send_message",
+    });
     expect(harness.tasks.getTask(task.id)?.status).toBe("waiting_approval");
 
     harness.advance(1_000);
@@ -172,7 +189,9 @@ describe("task state machine", () => {
       taskId: task.id,
       action: "send_message",
       target: "#kirim",
-      screenshot: "data:image/jpeg;base64,AAAA",
+      selector: "#kirim",
+      highlighted: true,
+      category: "send_message",
       at: "2026-10-25T10:00:00.000Z",
     });
     expect(entries[1]?.event).toEqual({
@@ -290,9 +309,15 @@ describe("task state machine", () => {
         return () =>
           harness.tasks.requestApproval(task.id, {
             action: "click",
-            payload: {},
+            payload: {
+              selector: "#x",
+              highlighted: false,
+              category: "submit_form",
+            },
             target: "#x",
-            screenshot: "data:image/jpeg;base64,AAAA",
+            selector: "#x",
+            highlighted: false,
+            category: "submit_form",
           });
       },
       code: "task_invalid_transition",

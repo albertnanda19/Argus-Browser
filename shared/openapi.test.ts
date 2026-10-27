@@ -443,6 +443,10 @@ describe("OpenAPI document", () => {
     expect(response?.description).toContain("step");
     expect(response?.description).toContain("heartbeat 15 detik");
     expect(response?.description).toContain("best-effort");
+    expect(response?.description).toContain("selector");
+    expect(response?.description).toContain("highlighted");
+    expect(response?.description).toContain("timeout approval 10 menit");
+    expect(response?.description).toContain("audit");
     expect(taskId?.schema.pattern).toBe("^t_[0-9a-f]{16}$");
     expect(lastEventId?.in).toBe("header");
     expect(lastEventId?.required).toBe(false);

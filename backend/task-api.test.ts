@@ -57,6 +57,7 @@ function createHarness() {
   const runner = {
     start: vi.fn(),
     cancel: vi.fn(),
+    notifyApprovalDecision: vi.fn(),
   };
 
   const profilesService: ProfileService = {
@@ -500,9 +501,15 @@ describe("POST /v1/tasks/:id/approval", () => {
     harness.tasks.startTask(task.id);
     const approval = harness.tasks.requestApproval(task.id, {
       action: "send_message",
-      payload: { text: "halo" },
+      payload: {
+        selector: "#kirim",
+        highlighted: true,
+        category: "send_message",
+      },
       target: "#kirim",
-      screenshot: "data:image/jpeg;base64,AAAA",
+      selector: "#kirim",
+      highlighted: true,
+      category: "send_message",
     });
     return { taskId: task.id, approvalId: approval.id };
   }
@@ -523,6 +530,10 @@ describe("POST /v1/tasks/:id/approval", () => {
     expect(body.data.approval.id).toBe(approvalId);
     expect(body.data.approval.decision).toBe("approved");
     expect(body.data.approval.decidedAt).toBe(fixedNow);
+    expect(harness.runner.notifyApprovalDecision).toHaveBeenCalledWith(
+      taskId,
+      true,
+    );
 
     const fetched = await harness.app.request(`/v1/tasks/${taskId}`, withAuth());
     expect((await json<{ data: Task }>(fetched)).data.status).toBe("running");
@@ -541,6 +552,10 @@ describe("POST /v1/tasks/:id/approval", () => {
     expect(body.data.task.status).toBe("cancelled");
     expect(body.data.task.completedAt).toBe(fixedNow);
     expect(body.data.approval.decision).toBe("rejected");
+    expect(harness.runner.notifyApprovalDecision).toHaveBeenCalledWith(
+      taskId,
+      false,
+    );
     expect(harness.events.list().at(-1)?.event).toEqual({
       type: "task.cancelled",
       taskId,

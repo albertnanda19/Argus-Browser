@@ -29,6 +29,18 @@ import { createTaskRunner } from "./task-runner";
 
 const SHUTDOWN_TIMEOUT_MS = 9_000;
 
+function readApprovalTimeoutMs(): number | undefined {
+  const raw = process.env.ARGUS_APPROVAL_TIMEOUT_MS;
+  if (raw === undefined) {
+    return undefined;
+  }
+
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 && value <= 2_147_483_647
+    ? value
+    : undefined;
+}
+
 async function main(): Promise<void> {
   const appDataDir = resolveAppDataDir();
   const token = randomBytes(32).toString("base64url");
@@ -72,6 +84,8 @@ async function main(): Promise<void> {
     steps,
     events,
     profilePolicies,
+    appDataDir,
+    approvalTimeoutMs: readApprovalTimeoutMs(),
   });
 
   const sessions: SessionService = sessionManager;

@@ -258,7 +258,7 @@ const LAST_EVENT_ID_PARAMETER: OpenApiParameter = {
 };
 
 const EVENT_STREAM_DESCRIPTION =
-  "Stream Server-Sent Events dengan heartbeat 15 detik berupa komentar ping. Nama event: agent.step, approval.requested, task.completed, task.failed, task.cancelled, dan step. Replay Last-Event-ID bersifat best-effort dan hilang saat sidecar restart.";
+  "Stream Server-Sent Events dengan heartbeat 15 detik berupa komentar ping. Nama event: agent.step, approval.requested, task.completed, task.failed, task.cancelled, dan step. approval.requested membawa action, target, selector, highlighted, dan category tanpa screenshot; timeout approval 10 menit membatalkan task dan setiap keputusan dicatat di audit log. Replay Last-Event-ID bersifat best-effort dan hilang saat sidecar restart.";
 
 const FREE_OBJECT_SCHEMA = inlineSchema(z.record(z.string(), z.unknown()), "output");
 

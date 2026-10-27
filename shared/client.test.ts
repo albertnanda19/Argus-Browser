@@ -811,6 +811,40 @@ describe("events.stream", () => {
     expect(fixture.stream.locked).toBe(false);
   });
 
+  it("accepts approval.requested frames with selector, highlight, and category", async () => {
+    const payload =
+      "id: 12\n" +
+      "event: approval.requested\n" +
+      `data: {"taskId":"${taskId}","action":"click","target":"#kirim","selector":"#kirim","highlighted":true,"category":"submit_form","at":"${timestamp}"}\n` +
+      "\n";
+    const fixture = createSseResponse([payload]);
+    const stub = createFetchStub(() => fixture.response);
+    const client = createClient(stub.fetch);
+    const controller = new AbortController();
+
+    const items = await readUntilAborted(
+      client.events.stream({ signal: controller.signal }),
+      controller,
+      1,
+    );
+
+    expect(items).toEqual([
+      {
+        id: "12",
+        event: {
+          type: "approval.requested",
+          taskId,
+          action: "click",
+          target: "#kirim",
+          selector: "#kirim",
+          highlighted: true,
+          category: "submit_form",
+          at: timestamp,
+        },
+      },
+    ]);
+  });
+
   it("skips heartbeats, unknown events, and invalid data", async () => {
     const payload =
       ": ping\n" +

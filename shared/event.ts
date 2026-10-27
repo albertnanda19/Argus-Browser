@@ -33,9 +33,11 @@ export type AgentStepEvent = z.infer<typeof agentStepEventSchema>;
 export const approvalRequestedEventSchema = z.strictObject({
   type: z.literal("approval.requested"),
   taskId: taskIdSchema,
-  action: z.string().min(1),
-  target: z.string().min(1),
-  screenshot: z.string().min(1),
+  action: z.string().min(1).max(100),
+  target: z.string().min(1).max(300),
+  selector: z.string().max(1000),
+  highlighted: z.boolean(),
+  category: z.string().min(1).max(50),
   at: z.iso.datetime({ offset: false }),
 });
 

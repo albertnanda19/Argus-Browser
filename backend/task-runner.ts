@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ProfilePolicy } from "../shared/profile-policy";
 import type { Session } from "../shared/session";
@@ -7,6 +7,10 @@ import {
   type AgentStepStore,
   type AgentStepVerification,
 } from "./agent-steps";
+import {
+  highlightApprovalElement,
+} from "./approval-highlight";
+import { appendAuditEntry, type AuditEntry } from "./audit-log";
 import type { BrowserSessionContext } from "./browser-launcher";
 import type { EventBus } from "./event-bus";
 import {
@@ -23,9 +27,13 @@ import {
   sampleActionDelay,
   type RandomSource,
 } from "./human-like";
-import { isIrreversibleAction } from "./irreversible-actions";
 import type { ProviderRegistry } from "./provider-registry";
 import type { ProviderService } from "./provider-service";
+import {
+  classifyActionRisk,
+  RiskClassificationError,
+  type RiskClassification,
+} from "./risk-classifier";
 import {
   AgentError,
   createStagehandAgent,
@@ -39,10 +47,14 @@ const DEFAULT_MAX_STEPS = 20;
 const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_INPUT_TIMEOUT_MS = 30_000;
+const DEFAULT_APPROVAL_TIMEOUT_MS = 10 * 60 * 1_000;
 
 const SESSION_NOT_READY_REASON = "Sesi tidak siap menjalankan task.";
 const SESSION_ENDED_REASON = "Sesi berakhir saat task berjalan.";
-const APPROVAL_REASON = "Aksi membutuhkan persetujuan manusia.";
+const APPROVAL_TIMEOUT_REASON = "Waktu persetujuan habis.";
+const RISK_CLASSIFICATION_FAILED_REASON =
+  "Klasifikasi risiko gagal dijalankan.";
+const RISK_INVALID_OUTPUT_REASON = "Klasifikasi risiko tidak dapat dibaca.";
 const NO_ACTION_REASON = "Agent tidak menemukan aksi untuk langkah ini.";
 const VERIFICATION_UNREADABLE_REASON = "Verifikasi tidak dapat dibaca.";
 const DEADLINE_REASON = "Batas waktu task terlampaui.";
@@ -112,6 +124,8 @@ export type TaskRunnerOptions = {
   readonly createInputExecutor?: TaskInputExecutorFactory;
   readonly random?: RandomSource;
   readonly inputTimeoutMs?: number;
+  readonly approvalTimeoutMs?: number;
+  readonly appDataDir?: string;
   readonly now?: () => Date;
   readonly maxSteps?: number;
   readonly maxDurationMs?: number;
@@ -121,7 +135,15 @@ export type TaskRunnerOptions = {
 export type TaskRunner = {
   start(taskId: string): void;
   cancel(taskId: string): void;
+  notifyApprovalDecision(taskId: string, approve: boolean): void;
   shutdown(): Promise<void>;
+};
+
+type ApprovalOutcome = "approved" | "rejected" | "timeout";
+
+type ApprovalGate = {
+  outcome: ApprovalOutcome | null;
+  notify: (() => void) | null;
 };
 
 type RunRecord = {
@@ -131,6 +153,13 @@ type RunRecord = {
   isQueued: boolean;
   isCancelRequested: boolean;
   isTimedOut: boolean;
+  cancelActor: "operator" | "system";
+  deadlineTimer: ReturnType<typeof setTimeout> | null;
+  deadlineRemainingMs: number;
+  deadlineStartedAtMs: number | null;
+  waitAccumulatedMs: number;
+  waitStartedAtMs: number | null;
+  approvalGate: ApprovalGate | null;
 };
 
 type SnapshotEvidence = {
@@ -678,6 +707,8 @@ class TaskRunnerImpl implements TaskRunner {
   private readonly createInputExecutor: TaskInputExecutorFactory;
   private readonly random: RandomSource;
   private readonly inputTimeoutMs: number;
+  private readonly approvalTimeoutMs: number;
+  private readonly appDataDir: string | undefined;
   private readonly now: () => Date;
   private readonly maxSteps: number;
   private readonly maxDurationMs: number;
@@ -699,6 +730,9 @@ class TaskRunnerImpl implements TaskRunner {
       options.createInputExecutor ?? createDefaultInputExecutor;
     this.random = options.random ?? Math.random;
     this.inputTimeoutMs = options.inputTimeoutMs ?? DEFAULT_INPUT_TIMEOUT_MS;
+    this.approvalTimeoutMs =
+      options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+    this.appDataDir = options.appDataDir;
     this.now = options.now ?? (() => new Date());
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
@@ -732,6 +766,13 @@ class TaskRunnerImpl implements TaskRunner {
         isQueued: true,
         isCancelRequested: false,
         isTimedOut: false,
+        cancelActor: "system",
+        deadlineTimer: null,
+        deadlineRemainingMs: 0,
+        deadlineStartedAtMs: null,
+        waitAccumulatedMs: 0,
+        waitStartedAtMs: null,
+        approvalGate: null,
       };
 
       this.records.set(taskId, record);
@@ -755,12 +796,25 @@ class TaskRunnerImpl implements TaskRunner {
     }
 
     record.isCancelRequested = true;
+    record.cancelActor = "operator";
     record.controller.abort();
 
     if (record.isQueued) {
       this.removeFromQueue(record.sessionId, taskId);
       this.records.delete(taskId);
     }
+  }
+
+  notifyApprovalDecision(taskId: string, approve: boolean): void {
+    const record = this.records.get(taskId);
+    if (record === undefined) {
+      return;
+    }
+
+    this.settleApprovalGate(
+      record,
+      approve ? "approved" : "rejected",
+    );
   }
 
   shutdown(): Promise<void> {
@@ -836,11 +890,7 @@ class TaskRunnerImpl implements TaskRunner {
     }
 
     const startedAtMs = this.now().getTime();
-    const deadlineTimer = setTimeout(() => {
-      record.isTimedOut = true;
-      record.controller.abort();
-    }, this.maxDurationMs);
-    deadlineTimer.unref?.();
+    this.armDeadline(record, this.maxDurationMs);
 
     let agent: StagehandAgent | null = null;
     let stepCount = 0;
@@ -907,7 +957,12 @@ class TaskRunnerImpl implements TaskRunner {
           return;
         }
 
-        if (this.now().getTime() - startedAtMs >= this.maxDurationMs) {
+        if (
+          this.now().getTime() -
+            startedAtMs -
+            this.totalWaitMs(record) >=
+          this.maxDurationMs
+        ) {
           this.failTask(record, DEADLINE_REASON);
           return;
         }
@@ -930,6 +985,7 @@ class TaskRunnerImpl implements TaskRunner {
           record,
           agent,
           executor,
+          context,
           policy,
           index: stepCount,
         });
@@ -950,7 +1006,7 @@ class TaskRunnerImpl implements TaskRunner {
       );
       this.failTask(record, this.failureReason(record, error));
     } finally {
-      clearTimeout(deadlineTimer);
+      this.clearDeadline(record);
 
       if (agent !== null) {
         await agent.close().catch(() => {
@@ -1137,10 +1193,11 @@ class TaskRunnerImpl implements TaskRunner {
     readonly record: RunRecord;
     readonly agent: StagehandAgent;
     readonly executor: InputExecutor;
+    readonly context: BrowserSessionContext;
     readonly policy: ProfilePolicy;
     readonly index: number;
   }): Promise<StepOutcome> {
-    const { record, agent, executor, policy, index } = input;
+    const { record, agent, executor, context, policy, index } = input;
     const startedAtMs = this.now().getTime();
     const goal = this.tasks.getTask(record.taskId)?.goal ?? "";
     let url = this.readUrl(record.sessionId);
@@ -1216,13 +1273,26 @@ class TaskRunnerImpl implements TaskRunner {
       300,
     );
 
-    if (
-      isIrreversibleAction({
-        description: action.description,
-        selector: action.selector,
-        instruction: goal,
-      })
-    ) {
+    let classification: RiskClassification;
+    try {
+      classification = await this.callAgent(record, () =>
+        classifyActionRisk({ agent, goal, action }),
+      );
+    } catch (error) {
+      if (error instanceof CancelledError) {
+        throw error;
+      }
+
+      const reason =
+        error instanceof RiskClassificationError &&
+        error.code === "risk_invalid_output"
+          ? RISK_INVALID_OUTPUT_REASON
+          : RISK_CLASSIFICATION_FAILED_REASON;
+      console.warn(
+        `Task risk classification failed: ${record.taskId}: ${
+          error instanceof Error ? error.name : "unknown"
+        }`,
+      );
       this.recordStep({
         record,
         action: actionKind,
@@ -1231,13 +1301,27 @@ class TaskRunnerImpl implements TaskRunner {
         url,
         pageChanged: false,
         verification: null,
-        status: "blocked",
+        status: "failed",
       });
-      this.failTask(record, APPROVAL_REASON);
+      this.failTask(record, reason);
       return "failed";
     }
 
-    await this.waitForActionDelay(record, policy);
+    if (classification.irreversible) {
+      const approved = await this.requestActionApproval({
+        record,
+        context,
+        action,
+        actionKind,
+        target,
+        category: classification.category,
+      });
+      if (!approved) {
+        return "failed";
+      }
+    } else {
+      await this.waitForActionDelay(record, policy);
+    }
 
     let executorResult: InputExecutionResult;
     try {
@@ -1421,6 +1505,311 @@ class TaskRunnerImpl implements TaskRunner {
     }
 
     return "continue";
+  }
+
+  private async requestActionApproval(input: {
+    readonly record: RunRecord;
+    readonly context: BrowserSessionContext;
+    readonly action: AgentAction;
+    readonly actionKind: string;
+    readonly target: string;
+    readonly category: string;
+  }): Promise<boolean> {
+    const { record, context, action, actionKind, target, category } = input;
+    const selector = truncate(action.selector, 1_000);
+    const approvalTarget = target.length === 0 ? "Aksi agent" : target;
+    const highlight = await highlightApprovalElement({
+      context,
+      selector: action.selector,
+    });
+    const highlighted = highlight.highlighted;
+    const clearHighlight = highlight.highlighted ? highlight.clear : null;
+
+    if (!highlight.highlighted) {
+      console.warn(
+        `Approval highlight failed: ${record.taskId}: ${highlight.reason}`,
+      );
+    }
+
+    this.pauseDeadline(record);
+    record.approvalGate = { outcome: null, notify: null };
+
+    let approvalId: string;
+    try {
+      const approval = this.tasks.requestApproval(record.taskId, {
+        action: actionKind,
+        target: approvalTarget,
+        selector,
+        highlighted,
+        category,
+        payload: { selector, highlighted, category },
+      });
+      approvalId = approval.id;
+    } catch (error) {
+      record.approvalGate = null;
+      await this.clearApprovalHighlight(record, clearHighlight);
+      console.warn(
+        `Approval request failed: ${record.taskId}: ${
+          error instanceof Error ? error.name : "unknown"
+        }`,
+      );
+      const isTerminal =
+        error instanceof TaskError &&
+        (error.code === "task_invalid_transition" ||
+          error.code === "task_not_found");
+      if (!isTerminal) {
+        this.failTask(record, INTERNAL_REASON);
+      }
+      return false;
+    }
+
+    const timeoutTimer = setTimeout(() => {
+      this.settleApprovalGate(record, "timeout");
+    }, this.approvalTimeoutMs);
+    timeoutTimer.unref?.();
+
+    await this.appendApprovalAudit(
+      record,
+      "approval.requested",
+      "system",
+      approvalId,
+      actionKind,
+      category,
+    );
+
+    let outcome: ApprovalOutcome;
+    try {
+      outcome = await this.waitForApprovalOutcome(record);
+    } catch (error) {
+      clearTimeout(timeoutTimer);
+      record.approvalGate = null;
+      await this.clearApprovalHighlight(record, clearHighlight);
+      await this.appendApprovalAudit(
+        record,
+        "approval.rejected",
+        record.cancelActor,
+        approvalId,
+        actionKind,
+        category,
+      );
+      throw error;
+    }
+
+    clearTimeout(timeoutTimer);
+    record.approvalGate = null;
+
+    if (outcome === "approved") {
+      this.resumeDeadline(record);
+      await this.clearApprovalHighlight(record, clearHighlight);
+      await this.appendApprovalAudit(
+        record,
+        "approval.approved",
+        "operator",
+        approvalId,
+        actionKind,
+        category,
+      );
+      return true;
+    }
+
+    await this.clearApprovalHighlight(record, clearHighlight);
+
+    if (outcome === "rejected") {
+      await this.appendApprovalAudit(
+        record,
+        "approval.rejected",
+        "operator",
+        approvalId,
+        actionKind,
+        category,
+      );
+      return false;
+    }
+
+    try {
+      this.tasks.resolveApproval(record.taskId, {
+        approve: false,
+        reason: APPROVAL_TIMEOUT_REASON,
+      });
+    } catch (error) {
+      this.ignoreTerminalError(record, error);
+    }
+
+    await this.appendApprovalAudit(
+      record,
+      "approval.timeout",
+      "system",
+      approvalId,
+      actionKind,
+      category,
+    );
+    return false;
+  }
+
+  private settleApprovalGate(
+    record: RunRecord,
+    outcome: ApprovalOutcome,
+  ): void {
+    const gate = record.approvalGate;
+    if (gate === null) {
+      return;
+    }
+
+    gate.outcome = outcome;
+    gate.notify?.();
+  }
+
+  private async waitForApprovalOutcome(
+    record: RunRecord,
+  ): Promise<ApprovalOutcome> {
+    const gate = record.approvalGate;
+    if (gate === null) {
+      throw new CancelledError();
+    }
+
+    const signal = record.controller.signal;
+
+    return await new Promise<ApprovalOutcome>((resolve, reject) => {
+      const onAbort = (): void => {
+        gate.notify = null;
+        signal.removeEventListener("abort", onAbort);
+        reject(new CancelledError());
+      };
+
+      const finish = (): void => {
+        signal.removeEventListener("abort", onAbort);
+        gate.notify = null;
+        const outcome = gate.outcome;
+        gate.outcome = null;
+        if (outcome === null) {
+          reject(new CancelledError());
+          return;
+        }
+        resolve(outcome);
+      };
+
+      if (record.isCancelRequested || signal.aborted) {
+        reject(new CancelledError());
+        return;
+      }
+
+      if (gate.outcome !== null) {
+        finish();
+        return;
+      }
+
+      gate.notify = finish;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private async clearApprovalHighlight(
+    record: RunRecord,
+    clear: (() => Promise<void>) | null,
+  ): Promise<void> {
+    if (clear === null) {
+      return;
+    }
+
+    try {
+      await clear();
+    } catch (error) {
+      console.warn(
+        `Approval highlight clear failed: ${record.taskId}: ${
+          error instanceof Error ? error.name : "unknown"
+        }`,
+      );
+    }
+  }
+
+  private async appendApprovalAudit(
+    record: RunRecord,
+    action: AuditEntry["action"],
+    actor: AuditEntry["actor"],
+    approvalId: string,
+    actionKind: string,
+    category: string,
+  ): Promise<void> {
+    if (this.appDataDir === undefined) {
+      return;
+    }
+
+    try {
+      await appendAuditEntry(this.appDataDir, {
+        id: randomUUID(),
+        actor,
+        action,
+        resource: record.taskId,
+        metadata: { approvalId, actionKind, category },
+        createdAt: this.now().toISOString(),
+      });
+    } catch (error) {
+      console.warn(
+        `Approval audit failed: ${record.taskId}: ${
+          error instanceof Error ? error.name : "unknown"
+        }`,
+      );
+    }
+  }
+
+  private armDeadline(record: RunRecord, durationMs: number): void {
+    this.clearDeadline(record);
+    record.deadlineRemainingMs = durationMs;
+    record.deadlineStartedAtMs = this.now().getTime();
+    record.deadlineTimer = setTimeout(() => {
+      record.isTimedOut = true;
+      record.controller.abort();
+    }, durationMs);
+    record.deadlineTimer.unref?.();
+  }
+
+  private clearDeadline(record: RunRecord): void {
+    if (record.deadlineTimer === null) {
+      return;
+    }
+
+    clearTimeout(record.deadlineTimer);
+    record.deadlineTimer = null;
+  }
+
+  private pauseDeadline(record: RunRecord): void {
+    if (record.deadlineTimer === null) {
+      return;
+    }
+
+    clearTimeout(record.deadlineTimer);
+    record.deadlineTimer = null;
+    const nowMs = this.now().getTime();
+    const startedAtMs = record.deadlineStartedAtMs ?? nowMs;
+    record.deadlineRemainingMs = Math.max(
+      0,
+      record.deadlineRemainingMs - (nowMs - startedAtMs),
+    );
+    record.deadlineStartedAtMs = null;
+    record.waitStartedAtMs = nowMs;
+  }
+
+  private resumeDeadline(record: RunRecord): void {
+    if (record.waitStartedAtMs !== null) {
+      record.waitAccumulatedMs += Math.max(
+        0,
+        this.now().getTime() - record.waitStartedAtMs,
+      );
+      record.waitStartedAtMs = null;
+    }
+
+    this.armDeadline(record, record.deadlineRemainingMs);
+  }
+
+  private totalWaitMs(record: RunRecord): number {
+    if (record.waitStartedAtMs === null) {
+      return record.waitAccumulatedMs;
+    }
+
+    return (
+      record.waitAccumulatedMs +
+      Math.max(0, this.now().getTime() - record.waitStartedAtMs)
+    );
   }
 
   private async waitForActionDelay(
@@ -1634,6 +2023,9 @@ class TaskRunnerImpl implements TaskRunner {
     this.isShutdown = true;
 
     for (const record of [...this.records.values()]) {
+      if (!record.isCancelRequested) {
+        record.cancelActor = "system";
+      }
       record.isCancelRequested = true;
       record.controller.abort();
 

@@ -41,7 +41,9 @@ export type ApprovalRequestInput = {
   readonly action: string;
   readonly payload: JsonObject;
   readonly target: string;
-  readonly screenshot: string;
+  readonly selector: string;
+  readonly highlighted: boolean;
+  readonly category: string;
 };
 
 export type ApprovalResult = {
@@ -207,7 +209,9 @@ class TaskManagerImpl implements TaskService {
       taskId,
       action: input.action,
       target: input.target,
-      screenshot: input.screenshot,
+      selector: input.selector,
+      highlighted: input.highlighted,
+      category: input.category,
       at,
     });
 
