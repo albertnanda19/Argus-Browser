@@ -20,6 +20,7 @@ const SESSION_CLOSE_TIMEOUT_MS = 10000;
 type SessionSectionProps = {
   readonly runtime: ArgusRuntime;
   readonly profile: Profile | null;
+  readonly onActiveSessionChange: (session: Session | null) => void;
 };
 
 type PendingAction = "start" | "close" | null;
@@ -35,7 +36,11 @@ async function fetchActiveSession(
   return findActiveSession(response.data, profileId);
 }
 
-export function SessionSection({ runtime, profile }: SessionSectionProps) {
+export function SessionSection({
+  runtime,
+  profile,
+  onActiveSessionChange,
+}: SessionSectionProps) {
   const profileId = profile?.id ?? null;
   const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(profile !== null);
@@ -45,6 +50,11 @@ export function SessionSection({ runtime, profile }: SessionSectionProps) {
   const pendingRef = useRef(false);
   const isMountedRef = useRef(true);
   const versionRef = useRef(0);
+  const onActiveSessionChangeRef = useRef(onActiveSessionChange);
+
+  useEffect(() => {
+    onActiveSessionChangeRef.current = onActiveSessionChange;
+  }, [onActiveSessionChange]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -52,6 +62,19 @@ export function SessionSection({ runtime, profile }: SessionSectionProps) {
       isMountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    const active =
+      session !== null && session.profileId === profileId ? session : null;
+    onActiveSessionChange(active);
+  }, [session, profileId, onActiveSessionChange]);
+
+  useEffect(
+    () => () => {
+      onActiveSessionChangeRef.current(null);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (profileId === null) {
