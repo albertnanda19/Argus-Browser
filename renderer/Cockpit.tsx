@@ -7,6 +7,7 @@ import { BrowserSetupSection } from "./BrowserSetupSection";
 import { isAbortError } from "./cockpit-state";
 import { ProfileSection } from "./ProfileSection";
 import { SessionSection } from "./SessionSection";
+import { TaskHistoryPanel } from "./TaskHistoryPanel";
 import {
   applyTaskEvent,
   clearOverlayStatuses,
@@ -176,6 +177,11 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
               runtime={runtime}
               profile={selectedProfile}
               onActiveSessionChange={handleActiveSessionChange}
+            />
+            <TaskHistoryPanel
+              runtime={runtime}
+              taskEvents={taskEvents}
+              reconnectVersion={reconnectVersion}
             />
             <BrowserSetupSection runtime={runtime} />
           </>

@@ -139,6 +139,22 @@ export const texts = {
       `Cuplikan halaman sesi ${profileName}`,
     thumbnailUnavailable: "Cuplikan belum tersedia.",
   },
+  taskHistory: {
+    heading: "Riwayat task",
+    loading: "Memuat riwayat task…",
+    empty: "Belum ada task.",
+    emptyFiltered: "Tidak ada task dengan status ini.",
+    retry: "Coba lagi",
+    reload: "Muat ulang",
+    loadMore: "Muat lebih banyak",
+    loadingMore: "Memuat…",
+    filterLabel: "Filter status",
+    filter: {
+      all: "Semua status",
+    },
+    createdLabel: "Dibuat",
+    durationLabel: (value: string) => `Durasi ${value}`,
+  },
   approval: {
     heading: (count: number) => `Antrean persetujuan (${count})`,
     truncated:
