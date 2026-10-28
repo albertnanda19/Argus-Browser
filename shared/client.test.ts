@@ -6,6 +6,7 @@ import type {
   ApprovalResponse,
   ProfileListResponse,
   ProfileResponse,
+  ResearchResultResponse,
   SessionListResponse,
   SessionResponse,
   TaskListResponse,
@@ -19,7 +20,7 @@ import {
 } from "./client";
 import type { HealthResponse, Problem } from "./contracts";
 import type { ProviderConfig, ProviderConfigRequest } from "./provider";
-import type { Approval, Task } from "./task";
+import type { Approval, TaskEntity } from "./task";
 import type { Profile } from "./profile";
 import { createDefaultProfilePolicy } from "./profile-policy";
 import type { Session } from "./session";
@@ -84,19 +85,56 @@ const sessionList: SessionListResponse = {
   page_size: 20,
 };
 
-const task: Task = {
+const task: TaskEntity = {
   id: taskId,
   sessionId,
   goal: "Cari kontak",
+  kind: "agent",
+  research: null,
   outputSchema: { email: "string" },
   status: "queued",
   createdAt: timestamp,
   completedAt: null,
 };
 
-const waitingTask: Task = { ...task, status: "waiting_approval" };
+const waitingTask: TaskEntity = { ...task, status: "waiting_approval" };
 
-const cancelledTask: Task = { ...task, status: "cancelled", completedAt: timestamp };
+const cancelledTask: TaskEntity = { ...task, status: "cancelled", completedAt: timestamp };
+
+const researchTask: TaskEntity = {
+  ...task,
+  id: "t_0000000000000002",
+  goal: "Cari kontak Budi",
+  kind: "research",
+  research: { targetName: "Budi Santoso", organization: "PT Contoh" },
+};
+
+const researchResult: ResearchResultResponse = {
+  data: {
+    taskId: researchTask.id,
+    contacts: [
+      {
+        id: "c_0000000000000001",
+        taskId: researchTask.id,
+        type: "whatsapp",
+        value: "+628123456789",
+        sourceUrl: "https://example.test/kontak",
+        method: "wa_me_link",
+        confidence: 0.8,
+        verification: "unverified",
+      },
+    ],
+    chain: [
+      {
+        id: "e_0000000000000001",
+        taskId: researchTask.id,
+        fromNode: "Budi Santoso",
+        toNode: "https://example.test/kontak",
+        how: "halaman kontak perusahaan menautkan nomor WhatsApp",
+      },
+    ],
+  },
+};
 
 const taskResponse: TaskResponse = { data: task };
 
@@ -271,6 +309,9 @@ function routeResponse(method: string, pathname: string): Response {
     return jsonResponse(taskResponse, 202);
   }
   if (key === `GET /v1/tasks/${taskId}`) return jsonResponse(taskResponse);
+  if (key === `GET /v1/tasks/${researchTask.id}/research`) {
+    return jsonResponse(researchResult);
+  }
   if (key === `GET /v1/tasks/${taskId}/steps`) return jsonResponse(agentStepList);
   if (key === `POST /v1/tasks/${taskId}/cancel`) {
     return jsonResponse({ data: cancelledTask }, 202);
@@ -407,6 +448,7 @@ describe("createArgusClient", () => {
     await client.tasks.get(taskId);
     await client.tasks.list({ page: 2, page_size: 5, sessionId, status: "queued" });
     await client.tasks.listSteps(taskId);
+    await client.tasks.getResearch(researchTask.id);
     await client.tasks.cancel(taskId);
     await client.tasks.resolveApproval(taskId, {
       approve: false,
@@ -442,6 +484,7 @@ describe("createArgusClient", () => {
       ["GET", `/v1/tasks/${taskId}`],
       ["GET", "/v1/tasks"],
       ["GET", `/v1/tasks/${taskId}/steps`],
+      ["GET", `/v1/tasks/${researchTask.id}/research`],
       ["POST", `/v1/tasks/${taskId}/cancel`],
       ["POST", `/v1/tasks/${taskId}/approval`],
       ["GET", "/v1/approvals"],
@@ -628,6 +671,68 @@ describe("createArgusClient", () => {
     expect(headers.get("Accept")).toBe("application/json");
   });
 
+  it("validates the research result of a task", async () => {
+    const stub = createFetchStub(({ input, init }) => {
+      expect(init?.method).toBe("GET");
+      expect(new URL(String(input)).pathname).toBe(
+        `/v1/tasks/${researchTask.id}/research`,
+      );
+      return jsonResponse(researchResult);
+    });
+    const client = createClient(stub.fetch);
+
+    const result = await client.tasks.getResearch(researchTask.id);
+
+    expect(result).toEqual(researchResult);
+  });
+
+  it("rejects a research result with a contact without sourceUrl", async () => {
+    const invalid = {
+      data: {
+        taskId: researchTask.id,
+        contacts: [
+          {
+            id: "c_0000000000000001",
+            taskId: researchTask.id,
+            type: "email",
+            value: "budi@example.test",
+            method: "email_text",
+            confidence: 0.5,
+            verification: "unverified",
+          },
+        ],
+        chain: [],
+      },
+    };
+    const stub = createFetchStub(() => jsonResponse(invalid));
+    const client = createClient(stub.fetch);
+
+    const error = requireArgusError(
+      await captureError(() => client.tasks.getResearch(researchTask.id)),
+    );
+
+    expect(error.status).toBe(200);
+    expect(error.message).toBe("Respons Argus tidak valid.");
+  });
+
+  it("raises a 409 problem when the task is not a research task", async () => {
+    const problem: Problem = {
+      type: "about:blank",
+      title: "Conflict",
+      status: 409,
+      detail: "Task ini bukan task riset.",
+    };
+    const stub = createFetchStub(() => jsonResponse(problem, 409));
+    const client = createClient(stub.fetch);
+
+    const error = requireArgusError(
+      await captureError(() => client.tasks.getResearch(taskId)),
+    );
+
+    expect(error.status).toBe(409);
+    expect(error.problem).toEqual(problem);
+  });
+
   it("validates task and approval lists and forwards filters", async () => {
     const stub = createFetchStub(({ input }) => {
       const url = new URL(String(input));
@@ -765,13 +870,14 @@ describe("createArgusClient", () => {
       "cancel",
       "create",
       "get",
+      "getResearch",
       "list",
       "listSteps",
       "resolveApproval",
     ]);
   });
 
-  it("exposes 26 documented methods", () => {
+  it("exposes 27 documented methods", () => {
     const stub = createFetchStub(() => jsonResponse(taskResponse));
     const client = createClient(stub.fetch);
     const methods = [
@@ -786,7 +892,7 @@ describe("createArgusClient", () => {
       ...Object.values(client.events),
     ];
 
-    expect(methods.filter((value) => typeof value === "function")).toHaveLength(26);
+    expect(methods.filter((value) => typeof value === "function")).toHaveLength(27);
   });
 
   it("does not read a body for 204 responses", async () => {

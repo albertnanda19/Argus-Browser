@@ -72,6 +72,7 @@ export function knownProblem(
       case "task_idempotency_conflict":
       case "task_not_cancellable":
       case "task_not_waiting_approval":
+      case "task_not_research":
       case "task_invalid_transition":
         return { status: 409, detail: error.message };
     }

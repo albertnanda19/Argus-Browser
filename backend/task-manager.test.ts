@@ -107,12 +107,47 @@ describe("task creation", () => {
     expect(task.id).toMatch(/^t_[0-9a-f]{16}$/);
     expect(task.sessionId).toBe(readySessionId);
     expect(task.goal).toBe("Buka halaman");
+    expect(task.kind).toBe("agent");
+    expect(task.research).toBeNull();
     expect(task.outputSchema).toBeNull();
     expect(task.status).toBe("queued");
     expect(task.createdAt).toBe("2026-10-25T10:00:00.000Z");
     expect(task.completedAt).toBeNull();
     expect(harness.tasks.listBySession(readySessionId)).toHaveLength(1);
     expect(eventTypes(harness.events.list().map((entry) => entry.event))).toEqual([]);
+  });
+
+  it("creates a research task with a normalized target", () => {
+    const harness = createHarness();
+    const withOrganization = harness.tasks.createTask(
+      readySessionId,
+      {
+        goal: "Cari kontak Budi",
+        kind: "research",
+        research: { targetName: "Budi Santoso", organization: "PT Contoh" },
+      },
+      "key-research",
+    );
+    const withoutOrganization = harness.tasks.createTask(
+      readySessionId,
+      {
+        goal: "Cari kontak Sari",
+        kind: "research",
+        research: { targetName: "Sari" },
+      },
+      "key-research-no-org",
+    );
+
+    expect(withOrganization.kind).toBe("research");
+    expect(withOrganization.research).toEqual({
+      targetName: "Budi Santoso",
+      organization: "PT Contoh",
+    });
+    expect(withoutOrganization.kind).toBe("research");
+    expect(withoutOrganization.research).toEqual({
+      targetName: "Sari",
+      organization: null,
+    });
   });
 
   it("rejects an unknown session", () => {
@@ -452,6 +487,57 @@ describe("idempotency", () => {
       () => harness.tasks.createTask(readySessionId, { goal: "Dua" }, "key-conflict"),
       "task_idempotency_conflict",
     );
+    expect(harness.tasks.listBySession(readySessionId)).toHaveLength(1);
+  });
+
+  it("rejects the same key with a different kind or research target", () => {
+    const harness = createHarness();
+    harness.tasks.createTask(
+      readySessionId,
+      {
+        goal: "Cari kontak",
+        kind: "research",
+        research: { targetName: "Budi" },
+      },
+      "key-research-conflict",
+    );
+
+    expectTaskError(
+      () =>
+        harness.tasks.createTask(
+          readySessionId,
+          {
+            goal: "Cari kontak",
+            kind: "research",
+            research: { targetName: "Sari" },
+          },
+          "key-research-conflict",
+        ),
+      "task_idempotency_conflict",
+    );
+    expectTaskError(
+      () =>
+        harness.tasks.createTask(
+          readySessionId,
+          { goal: "Cari kontak" },
+          "key-research-conflict",
+        ),
+      "task_idempotency_conflict",
+    );
+    expect(harness.tasks.listBySession(readySessionId)).toHaveLength(1);
+  });
+
+  it("returns the same research task for the same key and body", () => {
+    const harness = createHarness();
+    const request = {
+      goal: "Cari kontak",
+      kind: "research" as const,
+      research: { targetName: "Budi", organization: "PT Contoh" },
+    };
+    const first = harness.tasks.createTask(readySessionId, request, "key-research-org");
+    const second = harness.tasks.createTask(readySessionId, request, "key-research-org");
+
+    expect(second).toEqual(first);
     expect(harness.tasks.listBySession(readySessionId)).toHaveLength(1);
   });
 

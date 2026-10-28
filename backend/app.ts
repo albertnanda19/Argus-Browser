@@ -20,6 +20,7 @@ import {
   profileListResponseSchema,
   profilePolicyResponseSchema,
   profileResponseSchema,
+  researchResultResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
   taskListQuerySchema,
@@ -49,6 +50,8 @@ import type { BrowserSessionContext } from "./browser-launcher";
 import type { EventBus } from "./event-bus";
 import { createEventStream, type EventStreamRegistry } from "./event-stream";
 import { createProfileLock } from "./profile-lock";
+import { createResearchResultStore } from "./research-store";
+import { TaskError } from "./task-errors";
 import type { TaskService } from "./task-manager";
 import { capturePageThumbnail } from "./thumbnail";
 
@@ -191,6 +194,7 @@ export function createApp(options: AppOptions): Hono {
   const openApiDocument = createOpenApiDocument();
   const profileLock = createProfileLock();
   const thumbnailLock = createProfileLock();
+  const researchResults = createResearchResultStore();
   const eventStream = createEventStream({
     events: options.events,
     connections: options.eventConnections,
@@ -536,7 +540,9 @@ export function createApp(options: AppOptions): Hono {
 
     try {
       const task = options.tasks.createTask(parsedId.data, body.data, idempotencyKey.key);
-      options.runner.start(task.id);
+      if (task.kind === "agent") {
+        options.runner.start(task.id);
+      }
       return c.json(taskResponseSchema.parse({ data: task }), 202);
     } catch (error) {
       return handleKnownError(c, error);
@@ -601,6 +607,32 @@ export function createApp(options: AppOptions): Hono {
       paginate(steps, pagination.page, pagination.page_size),
     );
     return c.json(body, 200);
+  });
+
+  app.get("/v1/tasks/:id/research", (c) => {
+    const parsedId = taskIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id task tidak valid.");
+    }
+
+    try {
+      const task = options.tasks.getTask(parsedId.data);
+      if (task === null) {
+        throw new TaskError("task_not_found");
+      }
+      if (task.kind !== "research") {
+        throw new TaskError("task_not_research");
+      }
+
+      return c.json(
+        researchResultResponseSchema.parse({
+          data: researchResults.get(parsedId.data),
+        }),
+        200,
+      );
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
   });
 
   app.post("/v1/tasks/:id/cancel", (c) => {

@@ -2,12 +2,15 @@ import { z } from "zod";
 import { chromeInstallerStateSchema } from "./chrome-installer";
 import { profileIdSchema, profileNameSchema, profileSchema } from "./profile";
 import { profilePolicySchema } from "./profile-policy";
+import { researchResultSchema } from "./research";
 import { sessionIdSchema, sessionSchema } from "./session";
 import {
   approvalDecisionSchema,
   approvalSchema,
   jsonObjectSchema,
+  researchTargetSchema,
   taskIdSchema,
+  taskKindSchema,
   taskSchema,
   taskStatusSchema,
 } from "./task";
@@ -95,12 +98,37 @@ export type SessionListResponse = z.infer<typeof sessionListResponseSchema>;
 
 export const idempotencyKeySchema = z.string().trim().min(1).max(200);
 
-export const createTaskRequestSchema = z.strictObject({
-  goal: z.string().min(1).max(2000),
-  outputSchema: jsonObjectSchema.optional(),
+export const researchTargetRequestSchema = researchTargetSchema.extend({
+  organization: z.string().min(1).max(200).optional(),
 });
 
-export type CreateTaskRequest = z.infer<typeof createTaskRequestSchema>;
+export type ResearchTargetRequest = z.infer<typeof researchTargetRequestSchema>;
+
+export const createTaskRequestSchema = z
+  .strictObject({
+    goal: z.string().min(1).max(2000),
+    kind: taskKindSchema.default("agent"),
+    research: researchTargetRequestSchema.optional(),
+    outputSchema: jsonObjectSchema.optional(),
+  })
+  .superRefine((input, ctx) => {
+    if (input.kind === "agent" && input.research !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "research hanya berlaku untuk task riset.",
+        path: ["research"],
+      });
+    }
+    if (input.kind === "research" && input.research === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "research.targetName wajib diisi untuk task riset.",
+        path: ["research"],
+      });
+    }
+  });
+
+export type CreateTaskRequest = z.input<typeof createTaskRequestSchema>;
 
 export const approvalDecisionRequestSchema = z.discriminatedUnion("approve", [
   z.strictObject({ approve: z.literal(true) }),
@@ -141,3 +169,9 @@ export const approvalListResponseSchema = z.strictObject({
 });
 
 export type ApprovalListResponse = z.infer<typeof approvalListResponseSchema>;
+
+export const researchResultResponseSchema = z.strictObject({
+  data: researchResultSchema,
+});
+
+export type ResearchResultResponse = z.infer<typeof researchResultResponseSchema>;

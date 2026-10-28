@@ -7,6 +7,7 @@ export const TASK_ERROR_MESSAGES: Record<TaskErrorCode, string> = {
   task_not_found: "Task tidak ditemukan.",
   task_not_cancellable: "Task tidak dapat dibatalkan pada status ini.",
   task_not_waiting_approval: "Task tidak sedang menunggu persetujuan.",
+  task_not_research: "Task ini bukan task riset.",
   task_invalid_transition: "Perubahan status task tidak valid.",
 };
 

@@ -12,7 +12,8 @@ import {
   taskSchema,
   type Approval,
   type JsonObject,
-  type Task,
+  type ResearchTarget,
+  type TaskEntity,
   type TaskStatus,
 } from "../shared/task";
 import type { EventBus } from "./event-bus";
@@ -47,22 +48,22 @@ export type ApprovalRequestInput = {
 };
 
 export type ApprovalResult = {
-  readonly task: Task;
+  readonly task: TaskEntity;
   readonly approval: Approval;
 };
 
 export type TaskService = {
-  createTask(sessionId: string, input: CreateTaskRequest, idempotencyKey: string): Task;
-  getTask(taskId: string): Task | null;
-  listBySession(sessionId: string): Task[];
-  listTasks(): Task[];
+  createTask(sessionId: string, input: CreateTaskRequest, idempotencyKey: string): TaskEntity;
+  getTask(taskId: string): TaskEntity | null;
+  listBySession(sessionId: string): TaskEntity[];
+  listTasks(): TaskEntity[];
   listApprovals(): Approval[];
-  cancelTask(taskId: string): Task;
-  startTask(taskId: string): Task;
+  cancelTask(taskId: string): TaskEntity;
+  startTask(taskId: string): TaskEntity;
   requestApproval(taskId: string, input: ApprovalRequestInput): Approval;
   resolveApproval(taskId: string, input: ApprovalDecisionRequest): ApprovalResult;
-  completeTask(taskId: string, result: JsonObject): Task;
-  failTask(taskId: string, reason: string): Task;
+  completeTask(taskId: string, result: JsonObject): TaskEntity;
+  failTask(taskId: string, reason: string): TaskEntity;
   getApproval(approvalId: string): Approval | null;
 };
 
@@ -106,16 +107,28 @@ function createFingerprint(sessionId: string, input: CreateTaskRequest): string 
     canonicalize({
       sessionId,
       goal: input.goal,
+      kind: input.kind ?? "agent",
+      research: researchOf(input),
       outputSchema: input.outputSchema ?? null,
     }),
   );
+}
+
+function researchOf(input: CreateTaskRequest): ResearchTarget | null {
+  if ((input.kind ?? "agent") !== "research" || input.research === undefined) {
+    return null;
+  }
+  return {
+    targetName: input.research.targetName,
+    organization: input.research.organization ?? null,
+  };
 }
 
 class TaskManagerImpl implements TaskService {
   private readonly sessions: TaskSessionSource;
   private readonly events: EventBus;
   private readonly now: () => Date;
-  private readonly tasks = new Map<string, Task>();
+  private readonly tasks = new Map<string, TaskEntity>();
   private readonly approvals = new Map<string, Approval>();
   private readonly pendingApprovals = new Map<string, string>();
   private readonly idempotency = new Map<string, IdempotencyEntry>();
@@ -126,7 +139,7 @@ class TaskManagerImpl implements TaskService {
     this.now = options.now ?? (() => new Date());
   }
 
-  createTask(sessionId: string, input: CreateTaskRequest, idempotencyKey: string): Task {
+  createTask(sessionId: string, input: CreateTaskRequest, idempotencyKey: string): TaskEntity {
     const session = this.sessions.get(sessionId);
     if (session === null) {
       throw new TaskError("task_session_not_found");
@@ -157,6 +170,8 @@ class TaskManagerImpl implements TaskService {
       id: createTaskId(),
       sessionId,
       goal: input.goal,
+      kind: input.kind ?? "agent",
+      research: researchOf(input),
       outputSchema: input.outputSchema ?? null,
       status: "queued",
       createdAt: createdAt.toISOString(),
@@ -172,18 +187,18 @@ class TaskManagerImpl implements TaskService {
     return { ...task };
   }
 
-  getTask(taskId: string): Task | null {
+  getTask(taskId: string): TaskEntity | null {
     const task = this.tasks.get(taskId);
     return task === undefined ? null : { ...task };
   }
 
-  listBySession(sessionId: string): Task[] {
+  listBySession(sessionId: string): TaskEntity[] {
     return [...this.tasks.values()]
       .filter((task) => task.sessionId === sessionId)
       .map((task) => ({ ...task }));
   }
 
-  listTasks(): Task[] {
+  listTasks(): TaskEntity[] {
     return [...this.tasks.values()].map((task) => ({ ...task }));
   }
 
@@ -196,7 +211,7 @@ class TaskManagerImpl implements TaskService {
     return approval === undefined ? null : { ...approval };
   }
 
-  startTask(taskId: string): Task {
+  startTask(taskId: string): TaskEntity {
     const task = this.requireTask(taskId);
     if (task.status !== "queued") {
       throw new TaskError("task_invalid_transition");
@@ -266,7 +281,7 @@ class TaskManagerImpl implements TaskService {
     return { task: cancelled, approval: { ...resolvedApproval } };
   }
 
-  cancelTask(taskId: string): Task {
+  cancelTask(taskId: string): TaskEntity {
     const task = this.requireTask(taskId);
     if (!CANCELLABLE_STATUSES.has(task.status)) {
       throw new TaskError("task_not_cancellable");
@@ -279,7 +294,7 @@ class TaskManagerImpl implements TaskService {
     return cancelled;
   }
 
-  completeTask(taskId: string, result: JsonObject): Task {
+  completeTask(taskId: string, result: JsonObject): TaskEntity {
     const task = this.applyTransition(taskId, "completed");
     this.events.publish(
       taskCompletedEventSchema.parse({
@@ -292,7 +307,7 @@ class TaskManagerImpl implements TaskService {
     return task;
   }
 
-  failTask(taskId: string, reason: string): Task {
+  failTask(taskId: string, reason: string): TaskEntity {
     const task = this.applyTransition(taskId, "failed");
     this.events.publish(
       taskFailedEventSchema.parse({
@@ -305,7 +320,7 @@ class TaskManagerImpl implements TaskService {
     return task;
   }
 
-  private requireTask(taskId: string): Task {
+  private requireTask(taskId: string): TaskEntity {
     const task = this.tasks.get(taskId);
     if (task === undefined) {
       throw new TaskError("task_not_found");
@@ -313,7 +328,7 @@ class TaskManagerImpl implements TaskService {
     return task;
   }
 
-  private applyTransition(taskId: string, nextStatus: TaskStatus): Task {
+  private applyTransition(taskId: string, nextStatus: TaskStatus): TaskEntity {
     const task = this.requireTask(taskId);
     if (!TRANSITIONS[task.status].has(nextStatus)) {
       throw new TaskError("task_invalid_transition");
@@ -357,7 +372,7 @@ class TaskManagerImpl implements TaskService {
     );
   }
 
-  private completedAtOf(task: Task): string {
+  private completedAtOf(task: TaskEntity): string {
     if (task.completedAt === null) {
       throw new TaskError("task_invalid_transition");
     }

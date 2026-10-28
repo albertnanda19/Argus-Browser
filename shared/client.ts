@@ -15,6 +15,7 @@ import {
   profileListResponseSchema,
   profilePolicyResponseSchema,
   profileResponseSchema,
+  researchResultResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
   taskListResponseSchema,
@@ -30,6 +31,7 @@ import {
   type ProfileListResponse,
   type ProfilePolicyResponse,
   type ProfileResponse,
+  type ResearchResultResponse,
   type SessionListResponse,
   type SessionResponse,
   type TaskListQuery,
@@ -141,6 +143,7 @@ export type ArgusClient = {
       id: string,
       query?: Partial<PaginationQuery>,
     ): Promise<AgentStepListResponse>;
+    getResearch(id: string): Promise<ResearchResultResponse>;
     cancel(id: string): Promise<TaskResponse>;
     resolveApproval(
       id: string,
@@ -599,6 +602,13 @@ export function createArgusClient(options: ArgusClientOptions): ArgusClient {
           config,
           agentStepListResponseSchema,
           `/tasks/${encodeURIComponent(id)}/steps${paginationQuery(query)}`,
+          { method: "GET" },
+        ),
+      getResearch: (id) =>
+        request(
+          config,
+          researchResultResponseSchema,
+          `/tasks/${encodeURIComponent(id)}/research`,
           { method: "GET" },
         ),
       cancel: (id) =>

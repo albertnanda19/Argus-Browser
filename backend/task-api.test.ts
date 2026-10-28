@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
 import type { Profile } from "../shared/profile";
 import type { Session } from "../shared/session";
-import type { Task } from "../shared/task";
+import type { Task, TaskEntity } from "../shared/task";
 import { createApp, type ProfileService, type SessionService } from "./app";
 import type { BrowserPage, BrowserSessionContext } from "./browser-launcher";
 import { createEventBus } from "./event-bus";
@@ -228,10 +228,12 @@ describe("POST /v1/sessions/:id/tasks", () => {
     );
 
     expect(response.status).toBe(202);
-    const body = await json<{ data: Task }>(response);
+    const body = await json<{ data: TaskEntity }>(response);
     expect(body.data.id).toMatch(/^t_[0-9a-f]{16}$/);
     expect(body.data.sessionId).toBe(readySessionId);
     expect(body.data.goal).toBe("Buka halaman kontak");
+    expect(body.data.kind).toBe("agent");
+    expect(body.data.research).toBeNull();
     expect(body.data.outputSchema).toBeNull();
     expect(body.data.status).toBe("queued");
     expect(body.data.createdAt).toBe(fixedNow);
@@ -464,6 +466,232 @@ describe("POST /v1/sessions/:id/tasks", () => {
     );
 
     expect(response.status).toBe(401);
+  });
+});
+
+describe("POST /v1/sessions/:id/tasks research kind", () => {
+  async function createResearchTask(
+    harness: ReturnType<typeof createHarness>,
+    research: Record<string, unknown>,
+    key = "key-research",
+  ) {
+    const response = await harness.app.request(
+      `/v1/sessions/${readySessionId}/tasks`,
+      taskRequest(
+        readySessionId,
+        { goal: "Cari kontak Budi", kind: "research", research },
+        { "Idempotency-Key": key },
+      ),
+    );
+    return response;
+  }
+
+  it("creates a research task and keeps outputSchema opaque", async () => {
+    const harness = createHarness();
+    const outputSchema = { nested: { email: "string", score: 0.5 } };
+    const response = await harness.app.request(
+      `/v1/sessions/${readySessionId}/tasks`,
+      taskRequest(
+        readySessionId,
+        {
+          goal: "Cari kontak Budi",
+          kind: "research",
+          research: { targetName: "Budi Santoso", organization: "PT Contoh" },
+          outputSchema,
+        },
+        { "Idempotency-Key": "key-research-create" },
+      ),
+    );
+
+    expect(response.status).toBe(202);
+    const body = await json<{ data: TaskEntity }>(response);
+    expect(body.data.kind).toBe("research");
+    expect(body.data.research).toEqual({
+      targetName: "Budi Santoso",
+      organization: "PT Contoh",
+    });
+    expect(body.data.outputSchema).toEqual(outputSchema);
+    expect(body.data.status).toBe("queued");
+    expect(harness.runner.start).not.toHaveBeenCalled();
+  });
+
+  it("stores a missing organization as null", async () => {
+    const harness = createHarness();
+    const response = await createResearchTask(harness, { targetName: "Budi Santoso" });
+    const body = await json<{ data: TaskEntity }>(response);
+
+    expect(response.status).toBe(202);
+    expect(body.data.research).toEqual({
+      targetName: "Budi Santoso",
+      organization: null,
+    });
+  });
+
+  it.each([
+    { goal: "Cari kontak", kind: "research" },
+    { goal: "Cari kontak", kind: "research", research: {} },
+    { goal: "Cari kontak", kind: "research", research: { targetName: "" } },
+    {
+      goal: "Cari kontak",
+      kind: "research",
+      research: { targetName: "x".repeat(201) },
+    },
+    {
+      goal: "Cari kontak",
+      kind: "research",
+      research: { targetName: "Budi", organization: "x".repeat(201) },
+    },
+  ])("rejects an invalid research body %j with 400", async (body) => {
+    const harness = createHarness();
+    const response = await harness.app.request(
+      `/v1/sessions/${readySessionId}/tasks`,
+      taskRequest(readySessionId, body, { "Idempotency-Key": "key-research-invalid" }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toContain("application/problem+json");
+    await expect(response.json()).resolves.toMatchObject({
+      status: 400,
+      detail: "Body permintaan tidak valid.",
+    });
+    expect(harness.tasks.listBySession(readySessionId)).toHaveLength(0);
+  });
+
+  it.each([
+    { goal: "Cari kontak", research: { targetName: "Budi" } },
+    { goal: "Cari kontak", kind: "agent", research: { targetName: "Budi" } },
+  ])("rejects research on an agent task %j with 400", async (body) => {
+    const harness = createHarness();
+    const response = await harness.app.request(
+      `/v1/sessions/${readySessionId}/tasks`,
+      taskRequest(readySessionId, body, { "Idempotency-Key": "key-agent-research" }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(harness.tasks.listBySession(readySessionId)).toHaveLength(0);
+  });
+
+  it("rejects the same key with a different kind or research target with 409", async () => {
+    const harness = createHarness();
+    await createResearchTask(harness, { targetName: "Budi" }, "key-research-idempotent");
+    const response = await harness.app.request(
+      `/v1/sessions/${readySessionId}/tasks`,
+      taskRequest(
+        readySessionId,
+        { goal: "Cari kontak Budi", kind: "research", research: { targetName: "Sari" } },
+        { "Idempotency-Key": "key-research-idempotent" },
+      ),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      detail: "Idempotency-Key sudah dipakai untuk permintaan berbeda.",
+    });
+  });
+});
+
+describe("GET /v1/tasks/:id/research", () => {
+  async function researchTaskId(harness: ReturnType<typeof createHarness>, key: string) {
+    const created = await harness.app.request(
+      `/v1/sessions/${readySessionId}/tasks`,
+      taskRequest(
+        readySessionId,
+        {
+          goal: "Cari kontak",
+          kind: "research",
+          research: { targetName: "Budi Santoso" },
+        },
+        { "Idempotency-Key": key },
+      ),
+    );
+    return (await json<{ data: TaskEntity }>(created)).data.id;
+  }
+
+  it("returns an empty result immediately after creation", async () => {
+    const harness = createHarness();
+    const taskId = await researchTaskId(harness, "key-research-read");
+    const response = await harness.app.request(
+      `/v1/tasks/${taskId}/research`,
+      withAuth(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      data: { taskId, contacts: [], chain: [] },
+    });
+  });
+
+  it("keeps results isolated between research tasks", async () => {
+    const harness = createHarness();
+    const firstId = await researchTaskId(harness, "key-research-a");
+    const secondId = await researchTaskId(harness, "key-research-b");
+
+    const first = await harness.app.request(`/v1/tasks/${firstId}/research`, withAuth());
+    const second = await harness.app.request(`/v1/tasks/${secondId}/research`, withAuth());
+
+    expect((await json<{ data: { taskId: string } }>(first)).data.taskId).toBe(firstId);
+    expect((await json<{ data: { taskId: string } }>(second)).data.taskId).toBe(secondId);
+  });
+
+  it("returns 409 task_not_research for an agent task", async () => {
+    const harness = createHarness();
+    const created = await harness.app.request(
+      `/v1/sessions/${readySessionId}/tasks`,
+      taskRequest(readySessionId, { goal: "Buka" }, { "Idempotency-Key": "key-agent-read" }),
+    );
+    const taskId = (await json<{ data: TaskEntity }>(created)).data.id;
+    const response = await harness.app.request(
+      `/v1/tasks/${taskId}/research`,
+      withAuth(),
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.headers.get("content-type")).toContain("application/problem+json");
+    await expect(response.json()).resolves.toEqual({
+      type: "about:blank",
+      title: "Conflict",
+      status: 409,
+      detail: "Task ini bukan task riset.",
+    });
+  });
+
+  it("returns 404 for an unknown task and 400 for an invalid id", async () => {
+    const harness = createHarness();
+    const missing = await harness.app.request(
+      "/v1/tasks/t_ffffffffffffffff/research",
+      withAuth(),
+    );
+    const invalid = await harness.app.request("/v1/tasks/nope/research", withAuth());
+
+    expect(missing.status).toBe(404);
+    await expect(missing.json()).resolves.toMatchObject({
+      detail: "Task tidak ditemukan.",
+    });
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toMatchObject({
+      detail: "Id task tidak valid.",
+    });
+  });
+
+  it("requires a bearer token", async () => {
+    const { app } = createHarness();
+    const response = await app.request("/v1/tasks/t_ffffffffffffffff/research");
+
+    expect(response.status).toBe(401);
+  });
+
+  it("still cancels a research task", async () => {
+    const harness = createHarness();
+    const taskId = await researchTaskId(harness, "key-research-cancel");
+    const response = await harness.app.request(
+      `/v1/tasks/${taskId}/cancel`,
+      withAuth({ method: "POST" }),
+    );
+
+    expect(response.status).toBe(202);
+    const body = await json<{ data: TaskEntity }>(response);
+    expect(body.data.status).toBe("cancelled");
+    expect(body.data.kind).toBe("research");
   });
 });
 

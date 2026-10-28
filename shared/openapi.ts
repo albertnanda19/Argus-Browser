@@ -13,6 +13,7 @@ import {
   profileListResponseSchema,
   profilePolicyResponseSchema,
   profileResponseSchema,
+  researchResultResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
   taskListResponseSchema,
@@ -34,6 +35,11 @@ import {
   providerConfigSchema,
   providerResponseSchema,
 } from "./provider";
+import {
+  researchChainEntrySchema,
+  researchContactSchema,
+  researchResultSchema,
+} from "./research";
 import { sessionIdSchema, sessionSchema } from "./session";
 import {
   approvalDecisionSchema,
@@ -112,6 +118,10 @@ const COMPONENTS: readonly ComponentDefinition[] = [
   { name: "SessionListResponse", schema: sessionListResponseSchema, io: "output" },
   { name: "CreateSessionRequest", schema: createSessionRequestSchema, io: "input" },
   { name: "Task", schema: taskSchema, io: "output" },
+  { name: "ResearchContact", schema: researchContactSchema, io: "output" },
+  { name: "ResearchChainEntry", schema: researchChainEntrySchema, io: "output" },
+  { name: "ResearchResult", schema: researchResultSchema, io: "output" },
+  { name: "ResearchResultResponse", schema: researchResultResponseSchema, io: "output" },
   { name: "TaskResponse", schema: taskResponseSchema, io: "output" },
   { name: "TaskListResponse", schema: taskListResponseSchema, io: "output" },
   { name: "AgentStep", schema: agentStepSchema, io: "output" },
@@ -624,6 +634,21 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
         "400": BAD_REQUEST,
         "401": UNAUTHORIZED,
         "404": NOT_FOUND,
+      },
+    },
+  },
+  "/tasks/{id}/research": {
+    get: {
+      operationId: "getTaskResearch",
+      summary: "Hasil riset task",
+      tags: ["Tasks"],
+      parameters: [TASK_ID_PARAMETER],
+      responses: {
+        "200": jsonResponse("Hasil riset task.", "ResearchResultResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
+        "409": CONFLICT,
       },
     },
   },

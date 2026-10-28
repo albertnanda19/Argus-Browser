@@ -47,6 +47,7 @@ const EXPECTED_OPERATIONS = [
   "GET /tasks",
   "GET /tasks/{id}",
   "GET /tasks/{id}/steps",
+  "GET /tasks/{id}/research",
   "POST /tasks/{id}/cancel",
   "POST /tasks/{id}/approval",
   "GET /approvals",
@@ -191,8 +192,8 @@ describe("OpenAPI document", () => {
     const document = createOpenApiDocument();
     const operations = allOperations().map(({ method, path }) => `${method.toUpperCase()} ${path}`);
 
-    expect(Object.keys(document.paths)).toHaveLength(21);
-    expect(operations).toHaveLength(27);
+    expect(Object.keys(document.paths)).toHaveLength(22);
+    expect(operations).toHaveLength(28);
     expect(new Set(operations)).toEqual(new Set(EXPECTED_OPERATIONS));
   });
 
@@ -291,7 +292,7 @@ describe("OpenAPI document", () => {
     expect(schemas.AgentStepListResponse).toEqual(
       agentComponents.AgentStepListResponse,
     );
-    expect(Object.keys(schemas)).toHaveLength(33);
+    expect(Object.keys(schemas)).toHaveLength(37);
   });
 
   it("documents profile policy reads and writes", () => {
@@ -348,6 +349,11 @@ describe("OpenAPI document", () => {
 
     expect(requiredOf(createTask)).toContain("goal");
     expect(requiredOf(createTask)).not.toContain("outputSchema");
+    expect(requiredOf(createTask)).not.toContain("kind");
+    expect(requiredOf(createTask)).not.toContain("research");
+    expect(requiredOf(schemas.Task)).toEqual(
+      expect.arrayContaining(["kind", "research"]),
+    );
 
     const branches = actionRequest?.oneOf;
 
@@ -419,6 +425,51 @@ describe("OpenAPI document", () => {
     expect(Object.keys(createOpenApiDocument().paths["/tasks/{id}/steps"] ?? {})).toEqual([
       "get",
     ]);
+  });
+
+  it("documents the research result of a task", () => {
+    const document = createOpenApiDocument();
+    const schemas = document.components.schemas;
+    const operation = operationAt("get", "/tasks/{id}/research");
+
+    expect(operation.tags).toEqual(["Tasks"]);
+    expect(operation.parameters?.map((parameter) => parameter.name)).toEqual(["id"]);
+    expect(operation.responses["200"]).toEqual({
+      description: "Hasil riset task.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/ResearchResultResponse" },
+        },
+      },
+    });
+    expect(operation.responses["400"]).toBeDefined();
+    expect(operation.responses["401"]).toBeDefined();
+    expect(operation.responses["404"]).toBeDefined();
+    expect(operation.responses["409"]).toBeDefined();
+    expect(collectRefs(schemas.ResearchResultResponse)).toEqual([
+      "#/components/schemas/ResearchResult",
+    ]);
+    expect(collectRefs(schemas.ResearchResult)).toEqual([
+      "#/components/schemas/ResearchContact",
+      "#/components/schemas/ResearchChainEntry",
+    ]);
+    expect(requiredOf(schemas.ResearchContact)).toEqual([
+      "id",
+      "taskId",
+      "type",
+      "value",
+      "sourceUrl",
+      "method",
+      "confidence",
+      "verification",
+    ]);
+    expect(schemas.ResearchContact?.properties).toMatchObject({
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      sourceUrl: { type: "string", format: "uri" },
+    });
+    expect(requiredOf(schemas.Task)).toEqual(
+      expect.arrayContaining(["kind", "research"]),
+    );
   });
 
   it("documents cockpit read queries and thumbnail responses", () => {

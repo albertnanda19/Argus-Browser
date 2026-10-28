@@ -3,6 +3,17 @@ import { sessionIdSchema } from "./session";
 
 export const taskIdSchema = z.string().regex(/^t_[0-9a-f]{16}$/);
 
+export const taskKindSchema = z.enum(["agent", "research"]);
+
+export type TaskKind = z.infer<typeof taskKindSchema>;
+
+export const researchTargetSchema = z.strictObject({
+  targetName: z.string().min(1).max(200),
+  organization: z.string().min(1).max(200).nullable(),
+});
+
+export type ResearchTarget = z.infer<typeof researchTargetSchema>;
+
 export const taskStatusSchema = z.enum([
   "queued",
   "running",
@@ -22,13 +33,17 @@ export const taskSchema = z.strictObject({
   id: taskIdSchema,
   sessionId: sessionIdSchema,
   goal: z.string().min(1).max(2000),
+  kind: taskKindSchema.default("agent"),
+  research: researchTargetSchema.nullable().default(null),
   outputSchema: jsonObjectSchema.nullable(),
   status: taskStatusSchema,
   createdAt: z.iso.datetime({ offset: false }),
   completedAt: z.iso.datetime({ offset: false }).nullable(),
 });
 
-export type Task = z.infer<typeof taskSchema>;
+export type TaskEntity = z.infer<typeof taskSchema>;
+
+export type Task = Omit<TaskEntity, "kind" | "research">;
 
 export const approvalIdSchema = z.string().regex(/^a_[0-9a-f]{16}$/);
 
@@ -56,6 +71,7 @@ export const taskErrorCodeSchema = z.enum([
   "task_not_found",
   "task_not_cancellable",
   "task_not_waiting_approval",
+  "task_not_research",
   "task_invalid_transition",
 ]);
 
