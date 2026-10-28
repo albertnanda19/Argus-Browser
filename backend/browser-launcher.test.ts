@@ -74,6 +74,9 @@ describe("CDP launch configuration", () => {
     expect(launchArguments.args).toContain("--remote-debugging-address=127.0.0.1");
     expect(launchArguments.args).toContain("--remote-allow-origins=*");
     expect(launchArguments.args).toContain("--enable-unsafe-extension-debugging");
+    expect(launchArguments.args).toContain(
+      "--disable-blink-features=AutomationControlled",
+    );
     expect(launchArguments.args).not.toContain("--enable-automation");
     expect(launchArguments.ignoreDefaultArgs).toContain("--disable-extensions");
     expect(launchArguments.ignoreDefaultArgs).toContain("--enable-automation");

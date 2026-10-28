@@ -28,6 +28,43 @@ const CLEANUP_TIMEOUT_MS = 5_000;
 const CANVAS_WIDTH = 240;
 const CANVAS_HEIGHT = 60;
 const PROBE_EXPRESSION = `(() => {
+  const isNativeFunction = (fn) =>
+    Function.prototype.toString.call(fn).includes("[native code]");
+  const isNativeMethod = (owner, key, arity) => {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+    const fn = descriptor?.value;
+    return (
+      typeof fn === "function" &&
+      fn.name === key &&
+      fn.length === arity &&
+      isNativeFunction(fn) &&
+      !Object.hasOwn(fn, "prototype") &&
+      descriptor.writable === true &&
+      descriptor.enumerable === true &&
+      descriptor.configurable === true
+    );
+  };
+  const isNativeGetter = (owner, key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+    const getter = descriptor?.get;
+    return (
+      typeof getter === "function" &&
+      getter.name === "get " + key &&
+      getter.length === 0 &&
+      isNativeFunction(getter) &&
+      descriptor.set === undefined &&
+      descriptor.enumerable === true &&
+      descriptor.configurable === true
+    );
+  };
+  const hashBytes = (data) => {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < data.length; index += 1) {
+      hash ^= data[index];
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, "0");
+  };
   const canvas = document.createElement("canvas");
   canvas.width = ${CANVAS_WIDTH};
   canvas.height = ${CANVAS_HEIGHT};
@@ -42,6 +79,26 @@ const PROBE_EXPRESSION = `(() => {
   context.arc(200, 30, 16, 0, Math.PI * 2);
   context.stroke();
   const canvasDataUrl = canvas.toDataURL("image/png");
+  const canvasRepeatDataUrl = canvas.toDataURL("image/png");
+  const image = context.getImageData(0, 0, ${CANVAS_WIDTH}, ${CANVAS_HEIGHT});
+  const imageRepeat = context.getImageData(0, 0, ${CANVAS_WIDTH}, ${CANVAS_HEIGHT});
+  const subImage = context.getImageData(12, 8, 20, 10);
+  let imageDataConsistent = true;
+  for (let y = 0; y < subImage.height && imageDataConsistent; y += 1) {
+    for (let x = 0; x < subImage.width; x += 1) {
+      const subIndex = (y * subImage.width + x) * 4;
+      const fullIndex = ((8 + y) * ${CANVAS_WIDTH} + (12 + x)) * 4;
+      for (let channel = 0; channel < 4; channel += 1) {
+        if (subImage.data[subIndex + channel] !== image.data[fullIndex + channel]) {
+          imageDataConsistent = false;
+          break;
+        }
+      }
+      if (!imageDataConsistent) {
+        break;
+      }
+    }
+  }
   const glCanvas = document.createElement("canvas");
   const gl = glCanvas.getContext("webgl") || glCanvas.getContext("experimental-webgl");
   let webglVendor = "";
@@ -51,14 +108,30 @@ const PROBE_EXPRESSION = `(() => {
     webglVendor = String(gl.getParameter(debugInfo === null ? gl.VENDOR : debugInfo.UNMASKED_VENDOR_WEBGL));
     webglRenderer = String(gl.getParameter(debugInfo === null ? gl.RENDERER : debugInfo.UNMASKED_RENDERER_WEBGL));
   }
+  const windowArtifacts = Reflect.ownKeys(globalThis)
+    .map((key) => String(key))
+    .filter((key) => key.toLowerCase().includes("argus"));
   return {
     webdriver: navigator.webdriver === true,
+    webdriverGetterNative: isNativeGetter(Navigator.prototype, "webdriver"),
     hardwareConcurrency: navigator.hardwareConcurrency,
+    hardwareConcurrencyGetterNative: isNativeGetter(Navigator.prototype, "hardwareConcurrency"),
+    canvasMethodsNative:
+      isNativeMethod(HTMLCanvasElement.prototype, "toDataURL", 0) &&
+      isNativeMethod(HTMLCanvasElement.prototype, "toBlob", 1) &&
+      isNativeMethod(CanvasRenderingContext2D.prototype, "getImageData", 4),
+    windowArtifacts,
     webglVendor,
     webglRenderer,
     canvasWidth: canvas.width,
     canvasHeight: canvas.height,
     canvasDataUrl,
+    canvasRepeatDataUrl,
+    canvasImageDataHash: hashBytes(image.data),
+    canvasImageDataStable:
+      image.data.length === imageRepeat.data.length &&
+      image.data.every((value, index) => value === imageRepeat.data[index]),
+    canvasImageDataConsistent: imageDataConsistent,
     userAgent: navigator.userAgent,
     platform: navigator.platform,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -69,12 +142,20 @@ const PROBE_EXPRESSION = `(() => {
 
 type FingerprintProbe = {
   readonly webdriver: boolean;
+  readonly webdriverGetterNative: boolean;
   readonly hardwareConcurrency: number;
+  readonly hardwareConcurrencyGetterNative: boolean;
+  readonly canvasMethodsNative: boolean;
+  readonly windowArtifacts: readonly string[];
   readonly webglVendor: string;
   readonly webglRenderer: string;
   readonly canvasWidth: number;
   readonly canvasHeight: number;
   readonly canvasDataUrl: string;
+  readonly canvasRepeatDataUrl: string;
+  readonly canvasImageDataHash: string;
+  readonly canvasImageDataStable: boolean;
+  readonly canvasImageDataConsistent: boolean;
   readonly userAgent: string;
   readonly platform: string;
   readonly timeZone: string;
@@ -85,11 +166,20 @@ type FingerprintProbe = {
 type FingerprintReport = {
   readonly key: string;
   readonly webdriver: boolean;
+  readonly webdriverGetterNative: boolean;
   readonly hardwareConcurrency: number;
+  readonly hardwareConcurrencyGetterNative: boolean;
+  readonly canvasMethodsNative: boolean;
+  readonly windowArtifacts: readonly string[];
   readonly webglVendor: string;
   readonly webglRenderer: string;
   readonly canvasHash: string;
+  readonly canvasImageDataHash: string;
+  readonly canvasImageDataStable: boolean;
+  readonly canvasImageDataConsistent: boolean;
+  readonly canvasDataUrlStable: boolean;
   readonly argsHasEnableAutomation: boolean;
+  readonly argsHasAutomationControlDisabled: boolean;
   readonly canvasWidth: number;
   readonly canvasHeight: number;
   readonly canvasType: string;
@@ -108,6 +198,7 @@ type LaunchSample = {
   readonly stagehand: FingerprintProbe | null;
   readonly processCount: number;
   readonly argsHasEnableAutomation: boolean;
+  readonly argsHasAutomationControlDisabled: boolean;
   readonly canvasStableInPage: boolean;
   readonly stagehandCanvasStable: boolean | null;
 };
@@ -288,12 +379,20 @@ function parseProbe(value: unknown): FingerprintProbe {
 
   const {
     webdriver,
+    webdriverGetterNative,
     hardwareConcurrency,
+    hardwareConcurrencyGetterNative,
+    canvasMethodsNative,
+    windowArtifacts,
     webglVendor,
     webglRenderer,
     canvasWidth,
     canvasHeight,
     canvasDataUrl,
+    canvasRepeatDataUrl,
+    canvasImageDataHash,
+    canvasImageDataStable,
+    canvasImageDataConsistent,
     userAgent,
     platform,
     timeZone,
@@ -303,18 +402,35 @@ function parseProbe(value: unknown): FingerprintProbe {
 
   if (
     typeof webdriver !== "boolean" ||
+    typeof webdriverGetterNative !== "boolean" ||
     typeof hardwareConcurrency !== "number" ||
+    typeof hardwareConcurrencyGetterNative !== "boolean" ||
+    typeof canvasMethodsNative !== "boolean" ||
     typeof webglVendor !== "string" ||
     typeof webglRenderer !== "string" ||
     typeof canvasWidth !== "number" ||
     typeof canvasHeight !== "number" ||
     typeof canvasDataUrl !== "string" ||
+    typeof canvasRepeatDataUrl !== "string" ||
+    typeof canvasImageDataHash !== "string" ||
+    typeof canvasImageDataStable !== "boolean" ||
+    typeof canvasImageDataConsistent !== "boolean" ||
     typeof userAgent !== "string" ||
     typeof platform !== "string" ||
     typeof timeZone !== "string" ||
     typeof language !== "string"
   ) {
     throw new Error("Fingerprint probe returned an invalid shape.");
+  }
+
+  if (!Array.isArray(windowArtifacts)) {
+    throw new Error("Fingerprint probe did not return window artifacts.");
+  }
+  const artifactList = windowArtifacts.filter(
+    (item: unknown): item is string => typeof item === "string",
+  );
+  if (artifactList.length !== windowArtifacts.length) {
+    throw new Error("Fingerprint probe returned a non-string window artifact.");
   }
 
   if (!Array.isArray(languages)) {
@@ -329,12 +445,20 @@ function parseProbe(value: unknown): FingerprintProbe {
 
   return {
     webdriver,
+    webdriverGetterNative,
     hardwareConcurrency,
+    hardwareConcurrencyGetterNative,
+    canvasMethodsNative,
+    windowArtifacts: artifactList,
     webglVendor,
     webglRenderer,
     canvasWidth,
     canvasHeight,
     canvasDataUrl,
+    canvasRepeatDataUrl,
+    canvasImageDataHash,
+    canvasImageDataStable,
+    canvasImageDataConsistent,
     userAgent,
     platform,
     timeZone,
@@ -361,15 +485,25 @@ function toFingerprintReport(
   probe: FingerprintProbe,
   key: string,
   argsHasEnableAutomation: boolean,
+  argsHasAutomationControlDisabled: boolean,
 ): FingerprintReport {
   return {
     key,
     webdriver: probe.webdriver,
+    webdriverGetterNative: probe.webdriverGetterNative,
     hardwareConcurrency: probe.hardwareConcurrency,
+    hardwareConcurrencyGetterNative: probe.hardwareConcurrencyGetterNative,
+    canvasMethodsNative: probe.canvasMethodsNative,
+    windowArtifacts: probe.windowArtifacts,
     webglVendor: probe.webglVendor,
     webglRenderer: probe.webglRenderer,
     canvasHash: hashCanvas(probe.canvasDataUrl),
+    canvasImageDataHash: probe.canvasImageDataHash,
+    canvasImageDataStable: probe.canvasImageDataStable,
+    canvasImageDataConsistent: probe.canvasImageDataConsistent,
+    canvasDataUrlStable: probe.canvasDataUrl === probe.canvasRepeatDataUrl,
     argsHasEnableAutomation,
+    argsHasAutomationControlDisabled,
     canvasWidth: probe.canvasWidth,
     canvasHeight: probe.canvasHeight,
     canvasType: canvasType(probe.canvasDataUrl),
@@ -425,6 +559,9 @@ async function runLaunch(options: {
     const argsHasEnableAutomation = processes.some((line) =>
       line.includes("--enable-automation"),
     );
+    const argsHasAutomationControlDisabled = processes.some((line) =>
+      line.includes("--disable-blink-features=AutomationControlled"),
+    );
 
     const { localBrowser, Stagehand } = await import("@browserbasehq/stagehand");
     stagehandBrowser = await localBrowser.connect({ cdpUrl: launched.cdpUrl });
@@ -470,6 +607,7 @@ async function runLaunch(options: {
       stagehand: stagehandProbe,
       processCount: processes.length,
       argsHasEnableAutomation,
+      argsHasAutomationControlDisabled,
       canvasStableInPage,
       stagehandCanvasStable,
     };
@@ -544,6 +682,34 @@ async function runSmoke(state: SmokeState): Promise<SmokeReport> {
     noEnableAutomationInArguments: samples.every(
       (sample) => !sample.argsHasEnableAutomation,
     ),
+    automationControlDisabled: samples.every(
+      (sample) => sample.argsHasAutomationControlDisabled,
+    ),
+    noArgusWindowArtifacts:
+      firstPageProbes.every((probe) => probe.windowArtifacts.length === 0) &&
+      (stagehandProbe === null || stagehandProbe.windowArtifacts.length === 0),
+    nativeNavigatorDescriptors:
+      firstPageProbes.every(
+        (probe) => probe.webdriverGetterNative && probe.hardwareConcurrencyGetterNative,
+      ) &&
+      (stagehandProbe === null ||
+        (stagehandProbe.webdriverGetterNative &&
+          stagehandProbe.hardwareConcurrencyGetterNative)),
+    nativeCanvasMethods:
+      firstPageProbes.every((probe) => probe.canvasMethodsNative) &&
+      (stagehandProbe === null || stagehandProbe.canvasMethodsNative),
+    canvasImageDataStable:
+      firstPageProbes.every((probe) => probe.canvasImageDataStable) &&
+      (stagehandProbe === null || stagehandProbe.canvasImageDataStable),
+    canvasImageDataConsistent:
+      firstPageProbes.every((probe) => probe.canvasImageDataConsistent) &&
+      (stagehandProbe === null || stagehandProbe.canvasImageDataConsistent),
+    sameProfileImageDataStable:
+      a1.first.canvasImageDataHash === a2.first.canvasImageDataHash &&
+      (a1.stagehand === null ||
+        a1.stagehand.canvasImageDataHash === a1.first.canvasImageDataHash),
+    differentProfileImageDataDiffers:
+      a1.first.canvasImageDataHash !== b.first.canvasImageDataHash,
     firstPageWebdriverFalse: firstPageProbes.every((probe) => !probe.webdriver),
     stagehandPageWebdriverFalse:
       stagehandProbe !== null ? !stagehandProbe.webdriver : false,
@@ -628,7 +794,12 @@ async function runSmoke(state: SmokeState): Promise<SmokeReport> {
     },
     launches: {
       a1: {
-        first: toFingerprintReport(a1.first, a1.key, a1.argsHasEnableAutomation),
+        first: toFingerprintReport(
+          a1.first,
+          a1.key,
+          a1.argsHasEnableAutomation,
+          a1.argsHasAutomationControlDisabled,
+        ),
         stagehand:
           a1.stagehand === null
             ? null
@@ -636,14 +807,25 @@ async function runSmoke(state: SmokeState): Promise<SmokeReport> {
                 a1.stagehand,
                 a1.key,
                 a1.argsHasEnableAutomation,
+                a1.argsHasAutomationControlDisabled,
               ),
       },
       a2: {
-        first: toFingerprintReport(a2.first, a2.key, a2.argsHasEnableAutomation),
+        first: toFingerprintReport(
+          a2.first,
+          a2.key,
+          a2.argsHasEnableAutomation,
+          a2.argsHasAutomationControlDisabled,
+        ),
         stagehand: null,
       },
       b: {
-        first: toFingerprintReport(b.first, b.key, b.argsHasEnableAutomation),
+        first: toFingerprintReport(
+          b.first,
+          b.key,
+          b.argsHasEnableAutomation,
+          b.argsHasAutomationControlDisabled,
+        ),
         stagehand: null,
       },
     },
@@ -737,11 +919,20 @@ function emptyFingerprintReport(): FingerprintReport {
   return {
     key: "",
     webdriver: false,
+    webdriverGetterNative: false,
     hardwareConcurrency: 0,
+    hardwareConcurrencyGetterNative: false,
+    canvasMethodsNative: false,
+    windowArtifacts: [],
     webglVendor: "",
     webglRenderer: "",
     canvasHash: "",
+    canvasImageDataHash: "",
+    canvasImageDataStable: false,
+    canvasImageDataConsistent: false,
+    canvasDataUrlStable: false,
     argsHasEnableAutomation: false,
+    argsHasAutomationControlDisabled: false,
     canvasWidth: 0,
     canvasHeight: 0,
     canvasType: "",

@@ -77,38 +77,49 @@ export function canvasNoiseOffset(index: number, seed: number): number {
 
 export function buildFingerprintInitScript(profile: FingerprintProfile): string {
   const config = JSON.stringify({
-    hardwareConcurrency: profile.hardwareConcurrency,
     canvasNoiseSeed: profile.canvasNoiseSeed,
     maxCanvasPixels: MAX_CANVAS_PIXELS,
   });
 
   return `(() => {
   const config = ${config};
-  const marker = Symbol.for("argus.fingerprint");
-  if (globalThis[marker] === true) {
-    return;
-  }
-  Object.defineProperty(globalThis, marker, { value: true });
   const noiseOffset = ${canvasNoiseOffset.toString()};
-  const applyNoise = (data) => {
-    for (let index = 0; index < data.length; index += 4) {
-      const offset = noiseOffset(index / 4, config.canvasNoiseSeed);
+  const originalToString = Function.prototype.toString;
+  const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+  const originalPutImageData = CanvasRenderingContext2D.prototype.putImageData;
+  const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+  const nativeSources = new WeakMap();
+  const toInteger = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.trunc(number) : 0;
+  };
+  const applyNoise = (data, dataWidth, canvasWidth, startX, startY) => {
+    const pixelCount = data.length / 4;
+    for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+      const x = startX + (pixel % dataWidth);
+      const y = startY + Math.floor(pixel / dataWidth);
+      const offset = noiseOffset(y * canvasWidth + x, config.canvasNoiseSeed);
+      const index = pixel * 4;
       data[index] += offset;
       data[index + 1] += offset;
       data[index + 2] += offset;
     }
   };
-  const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-  const originalPutImageData = CanvasRenderingContext2D.prototype.putImageData;
-  const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-  const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+  const hasNoiseBudget = (canvas) => {
+    const pixelCount = canvas.width * canvas.height;
+    return (
+      Number.isFinite(pixelCount) &&
+      pixelCount > 0 &&
+      pixelCount <= config.maxCanvasPixels
+    );
+  };
   const createNoisyCopy = (canvas) => {
-    const width = canvas.width;
-    const height = canvas.height;
-    const pixelCount = width * height;
-    if (pixelCount === 0 || pixelCount > config.maxCanvasPixels) {
+    if (!hasNoiseBudget(canvas)) {
       return null;
     }
+    const width = canvas.width;
+    const height = canvas.height;
     const copy = document.createElement("canvas");
     copy.width = width;
     copy.height = height;
@@ -118,45 +129,90 @@ export function buildFingerprintInitScript(profile: FingerprintProfile): string 
     }
     context.drawImage(canvas, 0, 0);
     const image = originalGetImageData.call(context, 0, 0, width, height);
-    applyNoise(image.data);
+    applyNoise(image.data, width, width, 0, 0);
     originalPutImageData.call(context, image, 0, 0);
     return copy;
   };
-  try {
-    if (navigator.webdriver === true) {
-      Object.defineProperty(Navigator.prototype, "webdriver", {
-        get: () => false,
-        configurable: true,
-      });
-    }
-  } catch {}
-  try {
-    Object.defineProperty(Navigator.prototype, "hardwareConcurrency", {
-      get: () => config.hardwareConcurrency,
-      configurable: true,
-    });
-  } catch {}
-  HTMLCanvasElement.prototype.toDataURL = function (...args) {
-    try {
-      const copy = createNoisyCopy(this);
-      return originalToDataURL.apply(copy ?? this, args);
-    } catch {
-      return originalToDataURL.apply(this, args);
-    }
-  };
-  HTMLCanvasElement.prototype.toBlob = function (callback, ...args) {
-    try {
-      const copy = createNoisyCopy(this);
-      return originalToBlob.call(copy ?? this, callback, ...args);
-    } catch {
-      return originalToBlob.call(this, callback, ...args);
-    }
-  };
-  CanvasRenderingContext2D.prototype.getImageData = function (...args) {
-    const image = originalGetImageData.apply(this, args);
-    applyNoise(image.data);
-    return image;
-  };
+  const functionToString = {
+    toString() {
+      const source = nativeSources.get(this);
+      if (source !== undefined) {
+        return source;
+      }
+      return Reflect.apply(originalToString, this, []);
+    },
+  }.toString;
+  nativeSources.set(functionToString, "function toString() { [native code] }");
+  Object.defineProperty(Function.prototype, "toString", {
+    value: functionToString,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  const canvasToDataURL = {
+    toDataURL(...args) {
+      try {
+        const copy = createNoisyCopy(this);
+        return Reflect.apply(originalToDataURL, copy ?? this, args);
+      } catch {
+        return Reflect.apply(originalToDataURL, this, args);
+      }
+    },
+  }.toDataURL;
+  const canvasToBlob = {
+    toBlob(callback, ...args) {
+      try {
+        const copy = createNoisyCopy(this);
+        return Reflect.apply(originalToBlob, copy ?? this, [callback, ...args]);
+      } catch {
+        return Reflect.apply(originalToBlob, this, [callback, ...args]);
+      }
+    },
+  }.toBlob;
+  const contextGetImageData = {
+    getImageData(sx, sy, sw, sh, ...settings) {
+      const image = Reflect.apply(originalGetImageData, this, [
+        sx,
+        sy,
+        sw,
+        sh,
+        ...settings,
+      ]);
+      const canvas = this.canvas;
+      if (canvas === undefined || !hasNoiseBudget(canvas)) {
+        return image;
+      }
+      applyNoise(
+        image.data,
+        image.width,
+        canvas.width,
+        toInteger(sx),
+        toInteger(sy),
+      );
+      return image;
+    },
+  }.getImageData;
+  nativeSources.set(canvasToDataURL, "function toDataURL() { [native code] }");
+  nativeSources.set(canvasToBlob, "function toBlob() { [native code] }");
+  nativeSources.set(contextGetImageData, "function getImageData() { [native code] }");
+  Object.defineProperty(HTMLCanvasElement.prototype, "toDataURL", {
+    value: canvasToDataURL,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
+    value: canvasToBlob,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  Object.defineProperty(CanvasRenderingContext2D.prototype, "getImageData", {
+    value: contextGetImageData,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 })();`;
 }
 
@@ -332,6 +388,12 @@ export async function installFingerprintHardening(
     targetId: string | null,
   ): Promise<void> => {
     try {
+      await send("Emulation.setAutomationOverride", { enabled: false }, sessionId);
+      await send(
+        "Emulation.setHardwareConcurrencyOverride",
+        { hardwareConcurrency: options.profile.hardwareConcurrency },
+        sessionId,
+      );
       await send("Page.enable", {}, sessionId);
       await send(
         "Page.addScriptToEvaluateOnNewDocument",

@@ -98,6 +98,7 @@ export function createCdpLaunchArguments(port: number): CdpLaunchArguments {
       "--remote-debugging-address=127.0.0.1",
       "--remote-allow-origins=*",
       "--enable-unsafe-extension-debugging",
+      "--disable-blink-features=AutomationControlled",
     ],
     ignoreDefaultArgs: ["--disable-extensions", "--enable-automation"],
   };
