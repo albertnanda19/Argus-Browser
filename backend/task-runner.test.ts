@@ -1,5 +1,3 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
@@ -33,7 +31,6 @@ import type {
   StagehandExtractSchema,
 } from "./stagehand-runtime";
 import { createTaskManager, type TaskService } from "./task-manager";
-import { riskClassificationSchema } from "./risk-classifier";
 import {
   createTaskRunner,
   parseVerification,
@@ -101,12 +98,10 @@ type FakeAgentState = {
   actCalls: number;
   extractCalls: number;
   structuredExtractCalls: number;
-  riskExtractCalls: number;
   structuredSchemas: StagehandExtractSchema[];
   screenshotCalls: number;
   observeInstructions: string[];
   verifyInstructions: string[];
-  riskInstructions: string[];
 };
 
 type FakeAgentHooks = {
@@ -122,17 +117,7 @@ type FakeAgentHooks = {
     instruction: string,
     schema: StagehandExtractSchema,
   ) => Promise<unknown>;
-  readonly risk?: (
-    instruction: string,
-    schema: StagehandExtractSchema,
-  ) => Promise<unknown>;
   readonly close?: () => Promise<void>;
-};
-
-const safeRiskClassification = {
-  irreversible: false,
-  category: "none",
-  reason: "Aksi aman.",
 };
 
 function createFakeAgent(hooks: FakeAgentHooks = {}) {
@@ -144,12 +129,10 @@ function createFakeAgent(hooks: FakeAgentHooks = {}) {
     actCalls: 0,
     extractCalls: 0,
     structuredExtractCalls: 0,
-    riskExtractCalls: 0,
     structuredSchemas: [],
     screenshotCalls: 0,
     observeInstructions: [],
     verifyInstructions: [],
-    riskInstructions: [],
   };
   let snapshotCount = 0;
 
@@ -194,15 +177,6 @@ function createFakeAgent(hooks: FakeAgentHooks = {}) {
       });
     },
     extractStructured: async (instruction, schema) => {
-      if (schema === riskClassificationSchema) {
-        state.riskExtractCalls += 1;
-        state.riskInstructions.push(instruction);
-        if (hooks.risk !== undefined) {
-          return hooks.risk(instruction, schema);
-        }
-        return safeRiskClassification;
-      }
-
       state.extractCalls += 1;
       state.structuredExtractCalls += 1;
       state.structuredSchemas.push(schema);
@@ -279,7 +253,6 @@ const fixedRunnerNow = () => new Date(2026, 9, 26, 10, 0, 0);
 type FakeSessionsOptions = {
   readonly initialUrl?: string;
   readonly goto?: (url: string) => Promise<void>;
-  readonly highlightFails?: boolean;
 };
 
 function createFakeSessions(options: FakeSessionsOptions = {}) {
@@ -288,7 +261,6 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
   let currentUrl = options.initialUrl ?? pageUrl;
   let pages: BrowserPage[] = [];
   const gotoCalls: Array<{ readonly url: string; readonly timeout: number }> = [];
-  const cdpCalls: string[] = [];
 
   const page: BrowserPage = {
     goto: async (url, gotoOptions) => {
@@ -306,9 +278,7 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
     }),
   };
   pages = [page];
-  const context: BrowserSessionContext & {
-    newCDPSession(page: BrowserPage): Promise<unknown>;
-  } = {
+  const context: BrowserSessionContext = {
     close: async () => undefined,
     on: () => undefined,
     pages: () => pages,
@@ -316,27 +286,6 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
       pages = [...pages, page];
       return page;
     },
-    newCDPSession: async () => ({
-      send: async (method: string) => {
-        cdpCalls.push(method);
-        if (options.highlightFails === true) {
-          throw new Error("CDP command failed.");
-        }
-        if (method === "DOM.getDocument") {
-          return { root: { nodeId: 1 } };
-        }
-        if (method === "DOM.performSearch") {
-          return { searchId: "search-1" };
-        }
-        if (method === "DOM.getSearchResults") {
-          return { nodeIds: [2] };
-        }
-        return {};
-      },
-      detach: async () => {
-        cdpCalls.push("detach");
-      },
-    }),
   };
   const session: Session = {
     id: readySessionId,
@@ -382,7 +331,6 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
       pages = [];
     },
     gotoCalls,
-    cdpCalls,
   };
 }
 
@@ -392,8 +340,6 @@ type RunnerHarnessOptions = {
   readonly maxSteps?: number;
   readonly maxDurationMs?: number;
   readonly shutdownTimeoutMs?: number;
-  readonly approvalTimeoutMs?: number;
-  readonly appDataDir?: string;
   readonly now?: () => Date;
   readonly profilePolicies?: TaskPolicySource;
   readonly createInputExecutor?: TaskInputExecutorFactory;
@@ -426,8 +372,6 @@ function createRunnerHarness(options: RunnerHarnessOptions = {}) {
       (() => createFakeInputExecutor().executor),
     random: options.random,
     inputTimeoutMs: options.inputTimeoutMs,
-    approvalTimeoutMs: options.approvalTimeoutMs,
-    appDataDir: options.appDataDir,
     createAgent: options.createAgent ?? (async () => createFakeAgent().agent),
     maxSteps: options.maxSteps,
     maxDurationMs: options.maxDurationMs,
@@ -515,76 +459,6 @@ function waitForTerminal(events: EventBus, taskId: string): Promise<DomainEvent>
       }
     });
   });
-}
-
-function waitForApprovalRequested(
-  events: EventBus,
-  taskId: string,
-): Promise<Extract<DomainEvent, { type: "approval.requested" }>> {
-  return new Promise((resolve) => {
-    const unsubscribe = events.subscribe(({ event }) => {
-      if (event.type === "approval.requested" && event.taskId === taskId) {
-        unsubscribe();
-        resolve(event);
-      }
-    });
-  });
-}
-
-type AuditLine = {
-  readonly actor: string;
-  readonly action: string;
-  readonly resource: string;
-  readonly metadata: {
-    readonly approvalId: string;
-    readonly actionKind: string;
-    readonly category: string;
-  };
-};
-
-async function createAuditRoot(): Promise<string> {
-  const root = join("tmp", "testing");
-  await mkdir(root, { recursive: true });
-  return await mkdtemp(join(root, "task-runner-audit-"));
-}
-
-async function readAuditLines(appDataDir: string): Promise<AuditLine[]> {
-  const contents = await readFile(
-    join(appDataDir, "audit", "audit.jsonl"),
-    "utf8",
-  );
-  return contents
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as AuditLine);
-}
-
-async function waitForAuditAction(
-  appDataDir: string,
-  action: string,
-): Promise<AuditLine> {
-  const deadline = Date.now() + 1_000;
-
-  for (;;) {
-    try {
-      const found = (await readAuditLines(appDataDir)).find(
-        (entry) => entry.action === action,
-      );
-      if (found !== undefined) {
-        return found;
-      }
-    } catch {
-      if (Date.now() > deadline) {
-        throw new Error(`Audit action ${action} was not written.`);
-      }
-    }
-
-    if (Date.now() > deadline) {
-      throw new Error(`Audit action ${action} was not written.`);
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
 }
 
 async function withDeadline<T>(promise: Promise<T>, timeoutMs = 1_000): Promise<T> {
@@ -2448,480 +2322,46 @@ describe("agent.step events", () => {
   });
 });
 
-describe("task runner approval gate", () => {
-  const riskyAction: AgentAction = {
-    selector: "#lanjut",
-    description: "Buka kontak",
+describe("task runner action execution", () => {
+  const irreversibleAction: AgentAction = {
+    selector: "#hapus",
+    description: "Hapus semua data uji",
     method: "click",
   };
-  const riskyClassification = {
-    irreversible: true,
-    category: "submit_form",
-    reason: "Form akan dikirim.",
-  } as const;
 
-  function createRiskyAgent(hooks: FakeAgentHooks = {}) {
-    return createFakeAgent({
-      observe: async () => [riskyAction],
-      risk: async () => riskyClassification,
-      ...hooks,
+  it("executes an irreversible action without approval", async () => {
+    const fake = createFakeAgent({
+      observe: async () => [irreversibleAction],
     });
-  }
-
-  function completedExecutor() {
-    return createFakeInputExecutor(async () => ({
+    const executor = createFakeInputExecutor(async () => ({
       status: "done",
       actionCount: 1,
     }));
-  }
-
-  it("does not request approval for a safe action", async () => {
-    const fake = createFakeAgent({
-      observe: async () => [riskyAction],
-    });
-    const executor = completedExecutor();
     const harness = createRunnerHarness({
       createAgent: async () => fake.agent,
       createInputExecutor: () => executor.executor,
     });
-    const task = createTask(harness.tasks);
+    const task = createTask(harness.tasks, "Hapus semua data uji");
     const terminal = waitForTerminal(harness.events, task.id);
 
     harness.runner.start(task.id);
     const event = await withDeadline(terminal);
 
     expect(event.type).toBe("task.completed");
+    expect(harness.tasks.getTask(task.id)?.status).toBe("completed");
     expect(executor.state.calls).toHaveLength(1);
-    expect(fake.state.riskExtractCalls).toBe(1);
-    expect(
-      taskEvents(harness.events, task.id).some(
-        (item) => item.type === "approval.requested",
-      ),
-    ).toBe(false);
-  });
-
-  it("waits for approval on a risky action without executing it", async () => {
-    const sessions = createFakeSessions();
-    const fake = createRiskyAgent();
-    const executor = completedExecutor();
-    const harness = createRunnerHarness({
-      sessions,
-      createAgent: async () => fake.agent,
-      createInputExecutor: () => executor.executor,
-    });
-    const task = createTask(harness.tasks);
-    const approval = waitForApprovalRequested(harness.events, task.id);
-    const terminal = waitForTerminal(harness.events, task.id);
-
-    harness.runner.start(task.id);
-    const event = await withDeadline(approval);
-
-    expect(harness.tasks.getTask(task.id)?.status).toBe("waiting_approval");
-    expect(event).toMatchObject({
-      type: "approval.requested",
-      taskId: task.id,
-      action: "click",
-      target: "Buka kontak",
-      selector: "#lanjut",
-      highlighted: true,
-      category: "submit_form",
-    });
-    expect(executor.state.calls).toHaveLength(0);
+    expect(fake.state.structuredExtractCalls).toBe(1);
     expect(fake.state.actCalls).toBe(0);
-    expect(harness.steps.list(task.id)).toHaveLength(0);
+    expect(harness.steps.list(task.id).map((step) => step.result.status)).toEqual([
+      "done",
+    ]);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      action: "click",
+      target: "Hapus semua data uji",
+      result: { status: "done" },
+    });
     expect(
-      taskEvents(harness.events, task.id).some(
-        (item) => item.type === "agent.step",
-      ),
-    ).toBe(false);
-
-    harness.tasks.resolveApproval(task.id, {
-      approve: false,
-      reason: "Batal.",
-    });
-    harness.runner.notifyApprovalDecision(task.id, false);
-    await withDeadline(terminal);
-  });
-
-  it("executes the approved action once without repeating observe or classification", async () => {
-    const appDataDir = await createAuditRoot();
-    try {
-      const sessions = createFakeSessions();
-      const fake = createRiskyAgent();
-      const executor = completedExecutor();
-      const harness = createRunnerHarness({
-        appDataDir,
-        sessions,
-        profilePolicies: {
-          get: async () =>
-            createTestPolicy({
-              actionDelay: {
-                mu: 0,
-                sigma: 1,
-                minMs: 60_000,
-                maxMs: 60_000,
-              },
-            }),
-        },
-        createAgent: async () => fake.agent,
-        createInputExecutor: () => executor.executor,
-      });
-      const task = createTask(harness.tasks);
-      const approval = waitForApprovalRequested(harness.events, task.id);
-      const terminal = waitForTerminal(harness.events, task.id);
-
-      harness.runner.start(task.id);
-      await withDeadline(approval);
-      harness.tasks.resolveApproval(task.id, { approve: true });
-      harness.runner.notifyApprovalDecision(task.id, true);
-      const event = await withDeadline(terminal);
-
-      expect(event.type).toBe("task.completed");
-      expect(executor.state.calls).toHaveLength(1);
-      expect(fake.state.observeCalls).toBe(1);
-      expect(fake.state.riskExtractCalls).toBe(1);
-      expect(fake.state.structuredExtractCalls).toBe(1);
-      expect(fake.state.actCalls).toBe(0);
-      expect(harness.steps.list(task.id)).toHaveLength(1);
-      expect(harness.steps.last(task.id)).toMatchObject({
-        action: "click",
-        target: "Buka kontak",
-        result: {
-          status: "done",
-          verification: { stepOk: true, goalComplete: true },
-        },
-      });
-      expect(sessions.cdpCalls).toContain("Overlay.hideHighlight");
-      expect(
-        taskEvents(harness.events, task.id).map((item) => item.type),
-      ).toEqual(["approval.requested", "agent.step", "task.completed"]);
-
-      const requested = await waitForAuditAction(
-        appDataDir,
-        "approval.requested",
-      );
-      expect(requested.actor).toBe("system");
-      expect(requested.metadata).toMatchObject({
-        actionKind: "click",
-        category: "submit_form",
-      });
-      const approved = await waitForAuditAction(appDataDir, "approval.approved");
-      expect(approved.actor).toBe("operator");
-      expect(approved.metadata.approvalId).toMatch(/^a_[0-9a-f]{16}$/);
-    } finally {
-      await rm(appDataDir, { recursive: true, force: true });
-    }
-  });
-
-  it("cancels without a step when the operator rejects the action", async () => {
-    const appDataDir = await createAuditRoot();
-    try {
-      const fake = createRiskyAgent();
-      const executor = completedExecutor();
-      const harness = createRunnerHarness({
-        appDataDir,
-        createAgent: async () => fake.agent,
-        createInputExecutor: () => executor.executor,
-      });
-      const task = createTask(harness.tasks);
-      const approval = waitForApprovalRequested(harness.events, task.id);
-      const terminal = waitForTerminal(harness.events, task.id);
-
-      harness.runner.start(task.id);
-      await withDeadline(approval);
-      harness.tasks.resolveApproval(task.id, {
-        approve: false,
-        reason: "Nomor tujuan salah.",
-      });
-      harness.runner.notifyApprovalDecision(task.id, false);
-      const event = await withDeadline(terminal);
-
-      expect(event.type).toBe("task.cancelled");
-      if (event.type === "task.cancelled") {
-        expect(event.reason).toBe("Nomor tujuan salah.");
-      }
-      expect(harness.tasks.getTask(task.id)?.status).toBe("cancelled");
-      expect(executor.state.calls).toHaveLength(0);
-      expect(harness.steps.list(task.id)).toHaveLength(0);
-      expect(
-        taskEvents(harness.events, task.id).map((item) => item.type),
-      ).toEqual(["approval.requested", "task.cancelled"]);
-
-      const rejected = await waitForAuditAction(
-        appDataDir,
-        "approval.rejected",
-      );
-      expect(rejected.actor).toBe("operator");
-    } finally {
-      await rm(appDataDir, { recursive: true, force: true });
-    }
-  });
-
-  it("cancels the task when the approval timeout expires", async () => {
-    const appDataDir = await createAuditRoot();
-    try {
-      const fake = createRiskyAgent();
-      const executor = completedExecutor();
-      const harness = createRunnerHarness({
-        appDataDir,
-        approvalTimeoutMs: 20,
-        createAgent: async () => fake.agent,
-        createInputExecutor: () => executor.executor,
-      });
-      const task = createTask(harness.tasks);
-      const approval = waitForApprovalRequested(harness.events, task.id);
-      const terminal = waitForTerminal(harness.events, task.id);
-
-      harness.runner.start(task.id);
-      await withDeadline(approval);
-      const event = await withDeadline(terminal);
-
-      expect(event.type).toBe("task.cancelled");
-      if (event.type === "task.cancelled") {
-        expect(event.reason).toBe("Waktu persetujuan habis.");
-      }
-      expect(harness.tasks.getTask(task.id)?.status).toBe("cancelled");
-      expect(executor.state.calls).toHaveLength(0);
-      expect(harness.steps.list(task.id)).toHaveLength(0);
-      expect(
-        taskEvents(harness.events, task.id).some(
-          (item) => item.type === "task.completed",
-        ),
-      ).toBe(false);
-
-      const timeout = await waitForAuditAction(appDataDir, "approval.timeout");
-      expect(timeout.actor).toBe("system");
-    } finally {
-      await rm(appDataDir, { recursive: true, force: true });
-    }
-  });
-
-  it("marks an operator cancel during the wait as a rejection", async () => {
-    const appDataDir = await createAuditRoot();
-    try {
-      const fake = createRiskyAgent();
-      const executor = completedExecutor();
-      const harness = createRunnerHarness({
-        appDataDir,
-        createAgent: async () => fake.agent,
-        createInputExecutor: () => executor.executor,
-      });
-      const task = createTask(harness.tasks);
-      const approval = waitForApprovalRequested(harness.events, task.id);
-      const terminal = waitForTerminal(harness.events, task.id);
-
-      harness.runner.start(task.id);
-      await withDeadline(approval);
-      harness.tasks.cancelTask(task.id);
-      harness.runner.cancel(task.id);
-      const event = await withDeadline(terminal);
-
-      expect(event.type).toBe("task.cancelled");
-      expect(executor.state.calls).toHaveLength(0);
-      expect(harness.steps.list(task.id)).toHaveLength(0);
-
-      const rejected = await waitForAuditAction(
-        appDataDir,
-        "approval.rejected",
-      );
-      expect(rejected.actor).toBe("operator");
-    } finally {
-      await rm(appDataDir, { recursive: true, force: true });
-    }
-  });
-
-  it("marks a shutdown during the wait as a system rejection", async () => {
-    const appDataDir = await createAuditRoot();
-    try {
-      const fake = createRiskyAgent();
-      const executor = completedExecutor();
-      const harness = createRunnerHarness({
-        appDataDir,
-        shutdownTimeoutMs: 500,
-        createAgent: async () => fake.agent,
-        createInputExecutor: () => executor.executor,
-      });
-      const task = createTask(harness.tasks);
-      const approval = waitForApprovalRequested(harness.events, task.id);
-
-      harness.runner.start(task.id);
-      await withDeadline(approval);
-      await harness.runner.shutdown();
-
-      expect(harness.tasks.getTask(task.id)?.status).toBe("cancelled");
-      expect(executor.state.calls).toHaveLength(0);
-      expect(harness.steps.list(task.id)).toHaveLength(0);
-
-      const rejected = await waitForAuditAction(
-        appDataDir,
-        "approval.rejected",
-      );
-      expect(rejected.actor).toBe("system");
-    } finally {
-      await rm(appDataDir, { recursive: true, force: true });
-    }
-  });
-
-  it("pauses the task deadline while waiting for approval", async () => {
-    const fake = createRiskyAgent();
-    const executor = completedExecutor();
-    const harness = createRunnerHarness({
-      now: () => new Date(Date.now()),
-      maxDurationMs: 120,
-      approvalTimeoutMs: 5_000,
-      createAgent: async () => fake.agent,
-      createInputExecutor: () => executor.executor,
-    });
-    const task = createTask(harness.tasks);
-    const approval = waitForApprovalRequested(harness.events, task.id);
-    const terminal = waitForTerminal(harness.events, task.id);
-
-    harness.runner.start(task.id);
-    await withDeadline(approval);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    expect(harness.tasks.getTask(task.id)?.status).toBe("waiting_approval");
-
-    harness.tasks.resolveApproval(task.id, { approve: true });
-    harness.runner.notifyApprovalDecision(task.id, true);
-    const event = await withDeadline(terminal);
-
-    expect(event.type).toBe("task.completed");
-  });
-
-  it("keeps the remaining deadline budget after approval", async () => {
-    const fake = createRiskyAgent();
-    const executor = createFakeInputExecutor(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      return { status: "done", actionCount: 1 };
-    });
-    const harness = createRunnerHarness({
-      now: () => new Date(Date.now()),
-      maxDurationMs: 150,
-      approvalTimeoutMs: 5_000,
-      createAgent: async () => fake.agent,
-      createInputExecutor: () => executor.executor,
-    });
-    const task = createTask(harness.tasks);
-    const approval = waitForApprovalRequested(harness.events, task.id);
-    const terminal = waitForTerminal(harness.events, task.id);
-
-    harness.runner.start(task.id);
-    await withDeadline(approval);
-    await new Promise((resolve) => setTimeout(resolve, 60));
-
-    harness.tasks.resolveApproval(task.id, { approve: true });
-    harness.runner.notifyApprovalDecision(task.id, true);
-    const event = await withDeadline(terminal);
-
-    expect(event.type).toBe("task.failed");
-    if (event.type === "task.failed") {
-      expect(event.reason).toBe("Batas waktu task terlampaui.");
-    }
-    expect(executor.state.calls).toHaveLength(1);
-  });
-
-  it("requests approval with highlighted false when the highlight fails", async () => {
-    const sessions = createFakeSessions({ highlightFails: true });
-    const fake = createRiskyAgent();
-    const executor = completedExecutor();
-    const harness = createRunnerHarness({
-      sessions,
-      createAgent: async () => fake.agent,
-      createInputExecutor: () => executor.executor,
-    });
-    const task = createTask(harness.tasks);
-    const approval = waitForApprovalRequested(harness.events, task.id);
-    const terminal = waitForTerminal(harness.events, task.id);
-
-    harness.runner.start(task.id);
-    const event = await withDeadline(approval);
-
-    expect(event.highlighted).toBe(false);
-    expect(executor.state.calls).toHaveLength(0);
-
-    harness.tasks.resolveApproval(task.id, {
-      approve: false,
-      reason: "Batal.",
-    });
-    harness.runner.notifyApprovalDecision(task.id, false);
-    await withDeadline(terminal);
-  });
-
-  it.each<[string, () => Promise<unknown>, string]>([
-    [
-      "risk_classification_failed",
-      async () => {
-        throw new Error("classification failed");
-      },
-      "Klasifikasi risiko gagal dijalankan.",
-    ],
-    [
-      "risk_invalid_output",
-      async () => ({
-        irreversible: true,
-        category: "none",
-        reason: "Tidak konsisten.",
-      }),
-      "Klasifikasi risiko tidak dapat dibaca.",
-    ],
-  ])(
-    "fails closed when classification returns %s",
-    async (_label, risk, reason) => {
-      const fake = createRiskyAgent({ risk });
-      const executor = completedExecutor();
-      const harness = createRunnerHarness({
-        createAgent: async () => fake.agent,
-        createInputExecutor: () => executor.executor,
-      });
-      const task = createTask(harness.tasks);
-      const terminal = waitForTerminal(harness.events, task.id);
-
-      harness.runner.start(task.id);
-      const event = await withDeadline(terminal);
-
-      expect(event.type).toBe("task.failed");
-      if (event.type === "task.failed") {
-        expect(event.reason).toBe(reason);
-      }
-      expect(executor.state.calls).toHaveLength(0);
-      expect(fake.state.actCalls).toBe(0);
-      expect(harness.steps.last(task.id)).toMatchObject({
-        action: "click",
-        target: "Buka kontak",
-        result: { status: "failed", verification: null },
-      });
-    },
-  );
-
-  it("exits as cancelled when the task is no longer running at approval time", async () => {
-    let harness: ReturnType<typeof createRunnerHarness> | undefined;
-    let taskId = "";
-    const fake = createRiskyAgent({
-      risk: async () => {
-        harness?.tasks.cancelTask(taskId);
-        return riskyClassification;
-      },
-    });
-    const executor = completedExecutor();
-    harness = createRunnerHarness({
-      createAgent: async () => fake.agent,
-      createInputExecutor: () => executor.executor,
-    });
-    const task = createTask(harness.tasks);
-    taskId = task.id;
-    const terminal = waitForTerminal(harness.events, task.id);
-
-    harness.runner.start(task.id);
-    const event = await withDeadline(terminal);
-
-    expect(event.type).toBe("task.cancelled");
-    expect(
-      taskEvents(harness.events, task.id).some(
-        (item) => item.type === "task.failed",
-      ),
-    ).toBe(false);
-    expect(executor.state.calls).toHaveLength(0);
-    expect(harness.steps.list(task.id)).toHaveLength(0);
+      taskEvents(harness.events, task.id).map((item) => item.type),
+    ).toEqual(["agent.step", "task.completed"]);
   });
 });
