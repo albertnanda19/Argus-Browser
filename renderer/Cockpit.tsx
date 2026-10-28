@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Profile } from "../shared/profile";
 import type { Session } from "../shared/session";
 import type { ArgusRuntime } from "./api-runtime";
+import { ApprovalQueue } from "./ApprovalQueue";
 import { BrowserSetupSection } from "./BrowserSetupSection";
 import { isAbortError } from "./cockpit-state";
 import { ProfileSection } from "./ProfileSection";
@@ -191,6 +192,11 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
                 {texts.taskChat.streamDisconnected}
               </p>
             ) : null}
+            <ApprovalQueue
+              runtime={runtime}
+              taskEvents={taskEvents}
+              reconnectVersion={reconnectVersion}
+            />
             <TaskChat
               key={`${selectedProfile?.id ?? "none"}:${sessionForProfile?.id ?? "none"}`}
               runtime={runtime}

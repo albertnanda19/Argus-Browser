@@ -1,4 +1,9 @@
-import { useEffect, useRef } from "react";
+import {
+  useEffect,
+  useRef,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 type ConfirmDialogProps = {
   readonly title: string;
@@ -7,6 +12,9 @@ type ConfirmDialogProps = {
   readonly cancelLabel: string;
   readonly isPending: boolean;
   readonly error: string | null;
+  readonly isConfirmDisabled?: boolean;
+  readonly initialFocusRef?: RefObject<HTMLElement | null>;
+  readonly children?: ReactNode;
   readonly onConfirm: () => void;
   readonly onCancel: () => void;
 };
@@ -18,14 +26,18 @@ export function ConfirmDialog({
   cancelLabel,
   isPending,
   error,
+  isConfirmDisabled = false,
+  initialFocusRef,
+  children,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    cancelRef.current?.focus();
-  }, []);
+    const target = initialFocusRef?.current ?? cancelRef.current;
+    target?.focus();
+  }, [initialFocusRef]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -55,6 +67,7 @@ export function ConfirmDialog({
         <p className="dialog-message" id="dialog-message">
           {message}
         </p>
+        {children}
         {error === null ? null : (
           <p className="form-error" role="alert">
             {error}
@@ -74,7 +87,7 @@ export function ConfirmDialog({
             className="button button-danger"
             type="button"
             onClick={onConfirm}
-            disabled={isPending}
+            disabled={isPending || isConfirmDisabled}
           >
             {confirmLabel}
           </button>

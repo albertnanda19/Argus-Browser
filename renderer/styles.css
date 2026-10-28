@@ -515,6 +515,111 @@ body {
   gap: 0.5rem;
 }
 
+.approval-queue {
+  width: 100%;
+}
+
+.approval-notice {
+  width: min(100%, 78rem);
+  margin: 0 auto;
+  color: #86efac;
+  font-size: 0.9rem;
+}
+
+.approval-notice:not(:empty) {
+  margin-bottom: 0.75rem;
+}
+
+.approval-notice[role="alert"] {
+  color: #fca5a5;
+}
+
+.approval-panel {
+  width: 100%;
+  max-width: 78rem;
+  margin: 0 auto 1rem;
+}
+
+.approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.approval-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem;
+  border: 1px solid #334155;
+  border-radius: 0.65rem;
+  background-color: #0f172a;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 12rem;
+}
+
+.approval-goal {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: #f8fafc;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.approval-task-id {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.approval-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid #1e293b;
+}
+
+.approval-selector {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-highlight,
+.approval-warning {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.approval-highlight {
+  color: #86efac;
+}
+
+.approval-warning {
+  color: #fde68a;
+}
+
+.approval-reason {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
 .connection-banner {
   margin: 0 auto 1rem;
   max-width: 56rem;
@@ -741,19 +846,22 @@ body {
   font-size: 0.85rem;
 }
 
-.status-facts {
+.status-facts,
+.approval-facts {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 0.3rem 0.75rem;
   margin: 0;
 }
 
-.status-facts dt {
+.status-facts dt,
+.approval-facts dt {
   color: #94a3b8;
   font-size: 0.8rem;
 }
 
-.status-facts dd {
+.status-facts dd,
+.approval-facts dd {
   margin: 0;
   color: #e2e8f0;
   font-size: 0.85rem;
