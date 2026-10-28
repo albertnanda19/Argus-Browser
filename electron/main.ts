@@ -53,8 +53,10 @@ function openWindow(): void {
   }
 
   const window = new BrowserWindow({
-    width: 900,
-    height: 600,
+    width: 1280,
+    height: 860,
+    minWidth: 1024,
+    minHeight: 700,
     show: false,
     title: "Argus",
     backgroundColor: "#0f172a",
