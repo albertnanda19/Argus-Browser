@@ -3,6 +3,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import type {
+  Page,
+  Stagehand,
+  StagehandBrowser,
+} from "@browserbasehq/stagehand" with { "resolution-mode": "import" };
 import type { Profile } from "../../shared/profile";
 import { resolveAppDataDir } from "../app-data";
 import { launchBrowser } from "../browser-launcher";
@@ -136,19 +141,6 @@ type SmokeReport = {
   };
   readonly error?: string;
   readonly cleanup?: string;
-};
-
-type StagehandPageLike = {
-  evaluate(expression: string): Promise<unknown>;
-  url(): Promise<string>;
-};
-
-type StagehandBrowserLike = {
-  readonly context: {
-    pages(): Promise<StagehandPageLike[]>;
-    newPage(url?: string): Promise<StagehandPageLike>;
-  };
-  close(): Promise<void>;
 };
 
 type SmokeState = {
@@ -421,7 +413,8 @@ async function runLaunch(options: {
     userDataDir: options.profileDir,
     profileId: options.profile.id,
   });
-  let stagehandBrowser: StagehandBrowserLike | null = null;
+  let stagehandBrowser: StagehandBrowser | null = null;
+  let stagehand: Stagehand | null = null;
 
   try {
     const firstPage =
@@ -433,11 +426,15 @@ async function runLaunch(options: {
       line.includes("--enable-automation"),
     );
 
-    const { localBrowser } = await import("@browserbasehq/stagehand");
+    const { localBrowser, Stagehand } = await import("@browserbasehq/stagehand");
     stagehandBrowser = await localBrowser.connect({ cdpUrl: launched.cdpUrl });
+    stagehand = await Stagehand.create({
+      browser: stagehandBrowser,
+      logging: { level: "off" },
+    });
 
-    const stagehandPages = await stagehandBrowser.context.pages();
-    let firstStagehandPage: StagehandPageLike | null = null;
+    const stagehandPages = await stagehand.browser.context.pages();
+    let firstStagehandPage: Page | null = null;
     for (const page of stagehandPages) {
       if ((await page.url()).includes(FIRST_MARKER)) {
         firstStagehandPage = page;
@@ -453,15 +450,15 @@ async function runLaunch(options: {
     const canvasStableInPage =
       hashCanvas(first.canvasDataUrl) === hashCanvas(firstRepeat.canvasDataUrl);
 
-    let stagehand: FingerprintProbe | null = null;
+    let stagehandProbe: FingerprintProbe | null = null;
     let stagehandCanvasStable: boolean | null = null;
     if (options.includeStagehandPage) {
-      const stagehandPage = await stagehandBrowser.context.newPage(STAGEHAND_URL);
+      const stagehandPage = await stagehand.browser.context.newPage(STAGEHAND_URL);
       await waitForPageUrl(stagehandPage, STAGEHAND_MARKER, PAGE_TIMEOUT_MS);
-      stagehand = await probePage(stagehandPage);
+      stagehandProbe = await probePage(stagehandPage);
       const stagehandRepeat = await probePage(stagehandPage);
       stagehandCanvasStable =
-        hashCanvas(stagehand.canvasDataUrl) ===
+        hashCanvas(stagehandProbe.canvasDataUrl) ===
         hashCanvas(stagehandRepeat.canvasDataUrl);
     }
 
@@ -470,13 +467,16 @@ async function runLaunch(options: {
       key: options.profile.id,
       expectedHardwareConcurrency: expected.hardwareConcurrency,
       first,
-      stagehand,
+      stagehand: stagehandProbe,
       processCount: processes.length,
       argsHasEnableAutomation,
       canvasStableInPage,
       stagehandCanvasStable,
     };
   } finally {
+    if (stagehand !== null) {
+      await withTimeout(stagehand.close(), CLEANUP_TIMEOUT_MS).catch(() => undefined);
+    }
     if (stagehandBrowser !== null) {
       await withTimeout(stagehandBrowser.close(), CLEANUP_TIMEOUT_MS).catch(() => undefined);
     }
