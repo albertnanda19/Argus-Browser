@@ -72,7 +72,7 @@ describe("createActivityEntry", () => {
       }),
     );
 
-    expect(created.text).toBe("Langkah 1 · Langkah agent · tertahan · Panel");
+    expect(created.text).toBe("Langkah 1 · Langkah agen · tertahan · Panel");
   });
 
   it("truncates the agent target to 80 characters", () => {
@@ -204,10 +204,10 @@ describe("createActivityEntry", () => {
       id: "18",
       kind: "completed",
       at: AT,
-      text: "Task selesai · Semua kolom terisi.",
+      text: "Tugas selesai · Semua kolom terisi.",
       taskId: SHORT_TASK_ID,
     });
-    expect(withoutSummary.text).toBe("Task selesai.");
+    expect(withoutSummary.text).toBe("Tugas selesai.");
   });
 
   it("maps task.failed and truncates the reason to 160 characters", () => {
@@ -219,10 +219,10 @@ describe("createActivityEntry", () => {
         at: AT,
       }),
     );
-    const reason = created.text.replace("Task gagal · ", "");
+    const reason = created.text.replace("Tugas gagal · ", "");
 
     expect(created.kind).toBe("failed");
-    expect(created.text.startsWith("Task gagal · ")).toBe(true);
+    expect(created.text.startsWith("Tugas gagal · ")).toBe(true);
     expect(reason).toHaveLength(160);
     expect(reason.endsWith("…")).toBe(true);
     expect(created.text).not.toContain("z".repeat(200));
@@ -242,7 +242,7 @@ describe("createActivityEntry", () => {
       id: "21",
       kind: "cancelled",
       at: AT,
-      text: "Task dibatalkan · Waktu persetujuan habis.",
+      text: "Tugas dibatalkan · Waktu persetujuan habis.",
       taskId: SHORT_TASK_ID,
     });
   });
@@ -290,17 +290,17 @@ describe("filterActivityEntries", () => {
     }),
     entry("3", {
       kind: "completed",
-      text: "Task selesai · Semua kolom terisi.",
+      text: "Tugas selesai · Semua kolom terisi.",
       taskId: "t_33333333",
     }),
     entry("4", {
       kind: "failed",
-      text: "Task gagal · Jaringan tidak tersedia.",
+      text: "Tugas gagal · Jaringan tidak tersedia.",
       taskId: "t_44444444",
     }),
     entry("5", {
       kind: "cancelled",
-      text: "Task dibatalkan · Jaringan tidak tersedia.",
+      text: "Tugas dibatalkan · Jaringan tidak tersedia.",
       taskId: "t_55555555",
     }),
   ];

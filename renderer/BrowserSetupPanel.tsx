@@ -148,7 +148,7 @@ export function BrowserSetupPanel({
 }: BrowserSetupPanelProps) {
   if (state?.status === "ready") {
     return (
-      <section className="browser-panel">
+      <section className="browser-panel" aria-busy={isBusy}>
         {checkFailed ? (
           <p className="browser-error" role="alert">
             {texts.browser.checkFailed}
@@ -187,7 +187,11 @@ export function BrowserSetupPanel({
     (state?.status === "error" && state.source !== "local");
 
   return (
-    <section className="browser-panel" aria-labelledby="browser-heading">
+    <section
+      className="browser-panel"
+      aria-labelledby="browser-heading"
+      aria-busy={isBusy}
+    >
       <h2 className="browser-heading" id="browser-heading">
         {texts.browser.heading}
       </h2>

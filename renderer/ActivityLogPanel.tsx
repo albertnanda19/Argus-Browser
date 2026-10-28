@@ -80,7 +80,11 @@ export function ActivityLogPanel({ entries }: ActivityLogPanelProps) {
       ) : null}
 
       {visibleEntries.length === 0 ? null : (
-        <ol className="activity-list">
+        <ol
+          className="activity-list"
+          tabIndex={0}
+          aria-label={texts.activity.listLabel}
+        >
           {visibleEntries.map((entry) => (
             <li className="activity-item" key={entry.id} data-kind={entry.kind}>
               <div className="activity-meta">

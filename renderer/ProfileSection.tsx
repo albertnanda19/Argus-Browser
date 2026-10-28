@@ -176,7 +176,11 @@ export function ProfileSection({
   };
 
   return (
-    <section className="panel" aria-labelledby="profiles-heading">
+    <section
+      className="panel"
+      aria-labelledby="profiles-heading"
+      aria-busy={isLoading || pending !== null}
+    >
       <h2 className="panel-heading" id="profiles-heading">
         {texts.profiles.heading}
       </h2>
@@ -297,6 +301,7 @@ export function ProfileSection({
           }
           cancelLabel={texts.profiles.cancel}
           isPending={pending === "delete"}
+          tone="danger"
           error={deleteError}
           onConfirm={() => void handleDelete()}
           onCancel={closeDelete}

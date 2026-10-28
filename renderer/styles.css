@@ -140,6 +140,7 @@ body {
   color: #94a3b8;
   font-size: 0.9rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .profile-list {
@@ -178,6 +179,13 @@ body {
   accent-color: #38bdf8;
 }
 
+.profile-choice input:focus-visible,
+.history-list:focus-visible,
+.activity-list:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
 .profile-text {
   display: flex;
   flex-direction: column;
@@ -211,6 +219,7 @@ body {
   color: #fca5a5;
   font-size: 0.9rem;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .session-card {
@@ -339,6 +348,7 @@ body {
   color: #fca5a5;
   font-size: 0.9rem;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .browser-actions {
@@ -459,7 +469,7 @@ body {
 
 .browser-input::placeholder,
 .input::placeholder {
-  color: #64748b;
+  color: #94a3b8;
 }
 
 .browser-input:focus-visible,
@@ -506,6 +516,7 @@ body {
   margin: 0;
   color: #cbd5e1;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .dialog-actions {
@@ -524,6 +535,7 @@ body {
   margin: 0 auto;
   color: #86efac;
   font-size: 0.9rem;
+  overflow-wrap: anywhere;
 }
 
 .approval-notice:not(:empty) {

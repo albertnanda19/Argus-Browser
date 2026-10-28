@@ -407,14 +407,14 @@ describe("selectAgentReply", () => {
         overlay: { status: "completed" },
         steps: [createStep(1)],
       }),
-    ).toBe("Task selesai.");
+    ).toBe("Tugas selesai.");
     expect(
       selectAgentReply({
         status: "completed",
         overlay: undefined,
         steps: [],
       }),
-    ).toBe("Task selesai.");
+    ).toBe("Tugas selesai.");
   });
 
   it("shows the failure reason verbatim and its fallback", () => {
@@ -427,7 +427,7 @@ describe("selectAgentReply", () => {
     ).toBe("Model tidak merespons.");
     expect(
       selectAgentReply({ status: "failed", overlay: undefined, steps: [] }),
-    ).toBe("Task gagal.");
+    ).toBe("Tugas gagal.");
   });
 
   it("shows the cancellation reason verbatim and its fallback", () => {
@@ -440,7 +440,7 @@ describe("selectAgentReply", () => {
     ).toBe("Nomor tujuan salah.");
     expect(
       selectAgentReply({ status: "cancelled", overlay: undefined, steps: [] }),
-    ).toBe("Task dibatalkan.");
+    ).toBe("Tugas dibatalkan.");
   });
 });
 
@@ -459,7 +459,7 @@ describe("step labels", () => {
   it("translates known actions and hides unknown English values", () => {
     expect(formatStepAction("click")).toBe("mengeklik");
     expect(formatStepAction("navigate")).toBe("membuka halaman");
-    expect(formatStepAction("hover")).toBe("Langkah agent");
+    expect(formatStepAction("hover")).toBe("Langkah agen");
   });
 
   it("formats a step line in Indonesian", () => {

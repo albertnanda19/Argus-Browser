@@ -606,6 +606,7 @@ export function ApprovalQueue({
           }
           cancelLabel={texts.approval.cancel}
           isPending={isDecisionPending}
+          tone={dialog.kind === "approve" ? "primary" : "danger"}
           isConfirmDisabled={
             dialog.kind === "reject" &&
             rejectValidation?.isValid !== true

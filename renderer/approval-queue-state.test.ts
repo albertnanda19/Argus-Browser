@@ -150,8 +150,8 @@ describe("formatApprovalCategory", () => {
     expect(formatApprovalCategory("submit_form")).toBe("Kirim formulir");
     expect(formatApprovalCategory("delete_data")).toBe("Hapus data");
     expect(formatApprovalCategory("payment")).toBe("Pembayaran");
-    expect(formatApprovalCategory("upload_file")).toBe("Unggah file");
-    expect(formatApprovalCategory("publish_post")).toBe("Publikasikan posting");
+    expect(formatApprovalCategory("upload_file")).toBe("Unggah berkas");
+    expect(formatApprovalCategory("publish_post")).toBe("Publikasikan konten");
     expect(formatApprovalCategory("account_settings")).toBe(
       "Ubah pengaturan akun",
     );

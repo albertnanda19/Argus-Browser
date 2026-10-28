@@ -349,7 +349,11 @@ export function TaskHistoryPanel({
       ) : null}
 
       {visibleTasks.length === 0 ? null : (
-        <ol className="history-list">
+        <ol
+          className="history-list"
+          tabIndex={0}
+          aria-label={texts.taskHistory.listLabel}
+        >
           {visibleTasks.map((task) => {
             const status = effectiveTaskStatus(
               task.status,

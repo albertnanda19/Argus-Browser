@@ -401,7 +401,11 @@ export function TaskChat({
 
   return (
     <div className="workspace-grid">
-      <section className="panel chat-panel" aria-labelledby="workspace-heading">
+      <section
+        className="panel chat-panel"
+        aria-labelledby="workspace-heading"
+        aria-busy={isLoading || isSubmitting}
+      >
         <h2 className="panel-heading" id="workspace-heading">
           {texts.taskChat.heading}
         </h2>
