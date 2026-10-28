@@ -37,13 +37,19 @@ type FakeHarness = {
 
 const ROOT_NODE_ID = 7;
 const TARGET_NODE_ID = 42;
+const SEARCH_ID = "search-1";
+const XPATH_SELECTOR = "xpath=/html[1]/body[1]/button[1]";
+const XPATH_QUERY = "/html[1]/body[1]/button[1]";
 
 function defaultSend(method: string): Promise<unknown> {
   if (method === "DOM.getDocument") {
     return Promise.resolve({ root: { nodeId: ROOT_NODE_ID } });
   }
-  if (method === "DOM.querySelector") {
-    return Promise.resolve({ nodeId: TARGET_NODE_ID });
+  if (method === "DOM.performSearch") {
+    return Promise.resolve({ searchId: SEARCH_ID, resultCount: 1 });
+  }
+  if (method === "DOM.getSearchResults") {
+    return Promise.resolve({ nodeIds: [TARGET_NODE_ID] });
   }
   return Promise.resolve({});
 }
@@ -97,6 +103,10 @@ function callsSince(calls: readonly CdpCall[], index: number): string[] {
   return calls.slice(index).map((call) => call.method);
 }
 
+function findCall(calls: readonly CdpCall[], method: string): CdpCall | undefined {
+  return calls.find((call) => call.method === method);
+}
+
 function requireHighlighted(result: ApprovalHighlightResult): {
   readonly highlighted: true;
   clear(): Promise<void>;
@@ -112,7 +122,7 @@ afterEach(() => {
 });
 
 describe("approval highlight", () => {
-  it("highlights the queried node and keeps the CDP session open", async () => {
+  it("highlights the first CSS match with its node id and keeps the session open", async () => {
     const harness = createFakeHarness();
 
     const result = await highlightApprovalElement({
@@ -123,23 +133,179 @@ describe("approval highlight", () => {
     expect(result.highlighted).toBe(true);
     expect(harness.calls.map((call) => call.method)).toEqual([
       "DOM.getDocument",
-      "DOM.querySelector",
+      "DOM.performSearch",
+      "DOM.getSearchResults",
       "Overlay.enable",
       "Overlay.highlightNode",
+      "DOM.discardSearchResults",
     ]);
-    expect(harness.calls[1]?.params).toEqual({
-      nodeId: ROOT_NODE_ID,
-      selector: "#kirim",
+    expect(findCall(harness.calls, "DOM.performSearch")?.params).toEqual({
+      query: "#kirim",
     });
-    expect(harness.calls[3]?.params.nodeId).toBe(TARGET_NODE_ID);
-    expect(harness.calls[3]?.params.highlightConfig).toMatchObject({
+    expect(findCall(harness.calls, "Overlay.highlightNode")?.params.nodeId).toBe(
+      TARGET_NODE_ID,
+    );
+    expect(
+      findCall(harness.calls, "Overlay.highlightNode")?.params.highlightConfig,
+    ).toMatchObject({
       showInfo: true,
       showStyles: true,
       showRulers: true,
       contentColor: { a: expect.any(Number) },
       borderColor: { a: expect.any(Number) },
     });
+    expect(
+      findCall(harness.calls, "DOM.discardSearchResults")?.params,
+    ).toEqual({ searchId: SEARCH_ID });
     expect(harness.state.detachCalls).toBe(0);
+  });
+
+  it("strips the xpath prefix, highlights the first match, and discards the search", async () => {
+    const harness = createFakeHarness();
+
+    const result = await highlightApprovalElement({
+      context: harness.context,
+      selector: XPATH_SELECTOR,
+    });
+
+    expect(result.highlighted).toBe(true);
+    expect(findCall(harness.calls, "DOM.performSearch")?.params).toEqual({
+      query: XPATH_QUERY,
+    });
+    expect(findCall(harness.calls, "DOM.getSearchResults")?.params).toEqual({
+      searchId: SEARCH_ID,
+      fromIndex: 0,
+      toIndex: 1,
+    });
+    expect(findCall(harness.calls, "Overlay.highlightNode")?.params.nodeId).toBe(
+      TARGET_NODE_ID,
+    );
+    expect(
+      findCall(harness.calls, "DOM.discardSearchResults")?.params,
+    ).toEqual({ searchId: SEARCH_ID });
+    expect(harness.state.detachCalls).toBe(0);
+  });
+
+  it("passes the selector as CDP data without evaluating JavaScript", async () => {
+    const harness = createFakeHarness();
+
+    await highlightApprovalElement({
+      context: harness.context,
+      selector: XPATH_SELECTOR,
+    });
+
+    expect(
+      harness.calls.some((call) => call.method.startsWith("Runtime.")),
+    ).toBe(false);
+    expect(
+      harness.calls.some((call) =>
+        JSON.stringify(call.params).includes("function"),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns not_found when an xpath search has no results", async () => {
+    const harness = createFakeHarness({
+      send: async (method) => {
+        if (method === "DOM.getDocument") {
+          return { root: { nodeId: ROOT_NODE_ID } };
+        }
+        if (method === "DOM.performSearch") {
+          return { searchId: SEARCH_ID, resultCount: 0 };
+        }
+        if (method === "DOM.getSearchResults") {
+          return { nodeIds: [] };
+        }
+        return {};
+      },
+    });
+
+    const result = await highlightApprovalElement({
+      context: harness.context,
+      selector: "xpath=/html[1]/body[1]/button[9]",
+    });
+
+    expect(result).toEqual({ highlighted: false, reason: "not_found" });
+    expect(
+      findCall(harness.calls, "DOM.discardSearchResults")?.params,
+    ).toEqual({ searchId: SEARCH_ID });
+    expect(harness.state.detachCalls).toBe(1);
+  });
+
+  it("returns not_found when a CSS search has no results", async () => {
+    const harness = createFakeHarness({
+      send: async (method) => {
+        if (method === "DOM.getDocument") {
+          return { root: { nodeId: ROOT_NODE_ID } };
+        }
+        if (method === "DOM.performSearch") {
+          return { searchId: SEARCH_ID, resultCount: 0 };
+        }
+        if (method === "DOM.getSearchResults") {
+          return { nodeIds: [] };
+        }
+        return {};
+      },
+    });
+
+    const result = await highlightApprovalElement({
+      context: harness.context,
+      selector: "#missing",
+    });
+
+    expect(result).toEqual({ highlighted: false, reason: "not_found" });
+    expect(harness.state.detachCalls).toBe(1);
+  });
+
+  it("returns overlay_failed when the search rejects", async () => {
+    const harness = createFakeHarness({
+      send: async (method) => {
+        if (method === "DOM.getDocument") {
+          return { root: { nodeId: ROOT_NODE_ID } };
+        }
+        if (method === "DOM.performSearch") {
+          throw new Error("CDP command failed.");
+        }
+        return {};
+      },
+    });
+
+    const result = await highlightApprovalElement({
+      context: harness.context,
+      selector: XPATH_SELECTOR,
+    });
+
+    expect(result).toEqual({ highlighted: false, reason: "overlay_failed" });
+    expect(findCall(harness.calls, "DOM.discardSearchResults")).toBeUndefined();
+    expect(harness.state.detachCalls).toBe(1);
+  });
+
+  it("returns overlay_failed when reading search results rejects and still discards", async () => {
+    const harness = createFakeHarness({
+      send: async (method) => {
+        if (method === "DOM.getDocument") {
+          return { root: { nodeId: ROOT_NODE_ID } };
+        }
+        if (method === "DOM.performSearch") {
+          return { searchId: SEARCH_ID, resultCount: 1 };
+        }
+        if (method === "DOM.getSearchResults") {
+          throw new Error("CDP command failed.");
+        }
+        return {};
+      },
+    });
+
+    const result = await highlightApprovalElement({
+      context: harness.context,
+      selector: XPATH_SELECTOR,
+    });
+
+    expect(result).toEqual({ highlighted: false, reason: "overlay_failed" });
+    expect(
+      findCall(harness.calls, "DOM.discardSearchResults")?.params,
+    ).toEqual({ searchId: SEARCH_ID });
+    expect(harness.state.detachCalls).toBe(1);
   });
 
   it("clears the highlight, disables the overlay and detaches the session", async () => {
@@ -184,8 +350,11 @@ describe("approval highlight", () => {
         if (method === "DOM.getDocument") {
           return { root: { nodeId: ROOT_NODE_ID } };
         }
-        if (method === "DOM.querySelector") {
-          return { nodeId: TARGET_NODE_ID };
+        if (method === "DOM.performSearch") {
+          return { searchId: SEARCH_ID, resultCount: 1 };
+        }
+        if (method === "DOM.getSearchResults") {
+          return { nodeIds: [TARGET_NODE_ID] };
         }
         if (method === "Overlay.hideHighlight" || method === "Overlay.disable") {
           throw new Error("Overlay command failed.");
@@ -209,55 +378,22 @@ describe("approval highlight", () => {
   it("returns selector_missing without opening a CDP session", async () => {
     const harness = createFakeHarness();
 
-    const result = await highlightApprovalElement({
+    const blank = await highlightApprovalElement({
       context: harness.context,
       selector: "   ",
     });
+    const emptyXPath = await highlightApprovalElement({
+      context: harness.context,
+      selector: "xpath=   ",
+    });
 
-    expect(result).toEqual({ highlighted: false, reason: "selector_missing" });
+    expect(blank).toEqual({ highlighted: false, reason: "selector_missing" });
+    expect(emptyXPath).toEqual({
+      highlighted: false,
+      reason: "selector_missing",
+    });
     expect(harness.state.cdpSessions).toBe(0);
     expect(harness.calls).toEqual([]);
-  });
-
-  it("returns not_found when the selector has no node", async () => {
-    const harness = createFakeHarness({
-      send: async (method) => {
-        if (method === "DOM.getDocument") {
-          return { root: { nodeId: ROOT_NODE_ID } };
-        }
-        if (method === "DOM.querySelector") {
-          return { nodeId: 0 };
-        }
-        return {};
-      },
-    });
-
-    const result = await highlightApprovalElement({
-      context: harness.context,
-      selector: "#missing",
-    });
-
-    expect(result).toEqual({ highlighted: false, reason: "not_found" });
-    expect(harness.state.detachCalls).toBe(1);
-  });
-
-  it("returns overlay_failed when a CDP command rejects", async () => {
-    const harness = createFakeHarness({
-      send: async (method) => {
-        if (method === "DOM.getDocument") {
-          throw new Error("CDP command failed.");
-        }
-        return {};
-      },
-    });
-
-    const result = await highlightApprovalElement({
-      context: harness.context,
-      selector: "#kirim",
-    });
-
-    expect(result).toEqual({ highlighted: false, reason: "overlay_failed" });
-    expect(harness.state.detachCalls).toBe(1);
   });
 
   it("returns timeout when a CDP command exceeds the injected timeout", async () => {
@@ -267,8 +403,11 @@ describe("approval highlight", () => {
         if (method === "DOM.getDocument") {
           return { root: { nodeId: ROOT_NODE_ID } };
         }
-        if (method === "DOM.querySelector") {
-          return { nodeId: TARGET_NODE_ID };
+        if (method === "DOM.performSearch") {
+          return { searchId: SEARCH_ID, resultCount: 1 };
+        }
+        if (method === "DOM.getSearchResults") {
+          return { nodeIds: [TARGET_NODE_ID] };
         }
         if (method === "Overlay.highlightNode") {
           return await new Promise<unknown>(() => undefined);
@@ -279,13 +418,16 @@ describe("approval highlight", () => {
 
     const execution = highlightApprovalElement({
       context: harness.context,
-      selector: "#kirim",
+      selector: XPATH_SELECTOR,
       timeoutMs: 500,
     });
     await vi.advanceTimersByTimeAsync(500);
     const result = await execution;
 
     expect(result).toEqual({ highlighted: false, reason: "timeout" });
+    expect(
+      findCall(harness.calls, "DOM.discardSearchResults")?.params,
+    ).toEqual({ searchId: SEARCH_ID });
     expect(harness.state.detachCalls).toBe(1);
   });
 
@@ -304,8 +446,11 @@ describe("approval highlight", () => {
         if (method === "DOM.getDocument") {
           return { root: { nodeId: ROOT_NODE_ID } };
         }
-        if (method === "DOM.querySelector") {
-          return { nodeId: TARGET_NODE_ID };
+        if (method === "DOM.performSearch") {
+          return { searchId: SEARCH_ID, resultCount: 1 };
+        }
+        if (method === "DOM.getSearchResults") {
+          return { nodeIds: [TARGET_NODE_ID] };
         }
         if (method === "Overlay.highlightNode") {
           return await new Promise<unknown>((_resolve, reject) => {
@@ -319,7 +464,7 @@ describe("approval highlight", () => {
     try {
       const result = await highlightApprovalElement({
         context: harness.context,
-        selector: "#kirim",
+        selector: XPATH_SELECTOR,
         timeoutMs: 5,
       });
       expect(result).toEqual({ highlighted: false, reason: "timeout" });

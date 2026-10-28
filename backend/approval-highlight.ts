@@ -1,6 +1,7 @@
 import type { BrowserPage, BrowserSessionContext } from "./browser-launcher";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const XPATH_PREFIX = "xpath=";
 
 export type ApprovalHighlightFailureReason =
   | "selector_missing"
@@ -89,9 +90,33 @@ function readRootNodeId(document: unknown): number | null {
   return nodeId !== null && nodeId > 0 ? nodeId : null;
 }
 
-function readQueryNodeId(query: unknown): number | null {
-  const nodeId = readInteger(query, "nodeId");
-  return nodeId !== null && nodeId >= 0 ? nodeId : null;
+function readSearchId(search: unknown): string | null {
+  if (typeof search !== "object" || search === null) {
+    return null;
+  }
+  const value = Reflect.get(search, "searchId");
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readSearchNodeIds(results: unknown): readonly unknown[] | null {
+  if (typeof results !== "object" || results === null) {
+    return null;
+  }
+  const nodeIds = Reflect.get(results, "nodeIds");
+  return Array.isArray(nodeIds) ? nodeIds : null;
+}
+
+function readNodeId(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : null;
+}
+
+function resolveSearchQuery(selector: string): string {
+  if (!selector.startsWith(XPATH_PREFIX)) {
+    return selector;
+  }
+  return selector.slice(XPATH_PREFIX.length).trim();
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -125,10 +150,11 @@ async function sendCommand(
 async function sendIgnoringFailure(
   session: CdpSession,
   method: string,
+  params: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<void> {
   try {
-    await sendCommand(session, method, {}, timeoutMs);
+    await sendCommand(session, method, params, timeoutMs);
   } catch {
     return;
   }
@@ -158,8 +184,13 @@ function createClear(
     isCleared = true;
 
     try {
-      await sendIgnoringFailure(session, "Overlay.hideHighlight", timeoutMs);
-      await sendIgnoringFailure(session, "Overlay.disable", timeoutMs);
+      await sendIgnoringFailure(
+        session,
+        "Overlay.hideHighlight",
+        {},
+        timeoutMs,
+      );
+      await sendIgnoringFailure(session, "Overlay.disable", {}, timeoutMs);
     } finally {
       await detachSafely(session, timeoutMs);
     }
@@ -173,8 +204,14 @@ export async function highlightApprovalElement(
     return { highlighted: false, reason: "selector_missing" };
   }
 
+  const query = resolveSearchQuery(options.selector);
+  if (query.length === 0) {
+    return { highlighted: false, reason: "selector_missing" };
+  }
+
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let session: CdpSession | null = null;
+  let searchId: string | null = null;
   let shouldKeepSession = false;
 
   try {
@@ -200,23 +237,37 @@ export async function highlightApprovalElement(
       { depth: 1 },
       timeoutMs,
     );
-    const rootNodeId = readRootNodeId(document);
-    if (rootNodeId === null) {
+    if (readRootNodeId(document) === null) {
       return { highlighted: false, reason: "overlay_failed" };
     }
 
-    const query = await sendCommand(
+    const search = await sendCommand(
       activeSession,
-      "DOM.querySelector",
-      { nodeId: rootNodeId, selector: options.selector },
+      "DOM.performSearch",
+      { query },
       timeoutMs,
     );
-    const nodeId = readQueryNodeId(query);
-    if (nodeId === null) {
+    searchId = readSearchId(search);
+    if (searchId === null) {
       return { highlighted: false, reason: "overlay_failed" };
     }
-    if (nodeId === 0) {
+
+    const results = await sendCommand(
+      activeSession,
+      "DOM.getSearchResults",
+      { searchId, fromIndex: 0, toIndex: 1 },
+      timeoutMs,
+    );
+    const nodeIds = readSearchNodeIds(results);
+    if (nodeIds === null) {
+      return { highlighted: false, reason: "overlay_failed" };
+    }
+    if (nodeIds.length === 0) {
       return { highlighted: false, reason: "not_found" };
+    }
+    const nodeId = readNodeId(nodeIds[0]);
+    if (nodeId === null) {
+      return { highlighted: false, reason: "overlay_failed" };
     }
 
     await sendCommand(activeSession, "Overlay.enable", {}, timeoutMs);
@@ -239,6 +290,14 @@ export async function highlightApprovalElement(
         error instanceof HighlightTimeoutError ? "timeout" : "overlay_failed",
     };
   } finally {
+    if (session !== null && searchId !== null) {
+      await sendIgnoringFailure(
+        session,
+        "DOM.discardSearchResults",
+        { searchId },
+        timeoutMs,
+      );
+    }
     if (session !== null && !shouldKeepSession) {
       await detachSafely(session, timeoutMs);
     }
