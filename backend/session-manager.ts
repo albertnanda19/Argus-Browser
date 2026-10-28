@@ -171,6 +171,7 @@ class SessionManagerImpl implements SessionManager {
       const launched = await this.launchBrowser({
         executablePath,
         userDataDir: resolveProfileDir(this.appDataDir, record.session.profileId),
+        profileId: record.session.profileId,
       });
 
       context = launched.context;

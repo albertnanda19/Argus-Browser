@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   allocateCdpPort,
   createCdpLaunchArguments,
@@ -13,17 +13,29 @@ const { launchPersistentContext } = vi.hoisted(() => ({
   launchPersistentContext: vi.fn(),
 }));
 
+const { installFingerprintHardening } = vi.hoisted(() => ({
+  installFingerprintHardening: vi.fn(),
+}));
+
 vi.mock("playwright-core", () => ({
   chromium: { launchPersistentContext },
 }));
 
+vi.mock("./browser-stealth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./browser-stealth")>();
+  return { ...actual, installFingerprintHardening };
+});
+
 function createFakeContext() {
   let closeCalls = 0;
+  const listeners: Array<() => void> = [];
   const context: BrowserSessionContext = {
     async close() {
       closeCalls += 1;
     },
-    on() {},
+    on(_event, listener) {
+      listeners.push(listener);
+    },
     pages: () => [],
     async newPage() {
       throw new Error("Unused page creation.");
@@ -34,11 +46,21 @@ function createFakeContext() {
     get closeCalls() {
       return closeCalls;
     },
+    emitClose() {
+      for (const listener of listeners) {
+        listener();
+      }
+    },
   };
 }
 
+beforeEach(() => {
+  installFingerprintHardening.mockResolvedValue({ close: async () => undefined });
+});
+
 afterEach(() => {
   launchPersistentContext.mockReset();
+  installFingerprintHardening.mockReset();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -52,7 +74,9 @@ describe("CDP launch configuration", () => {
     expect(launchArguments.args).toContain("--remote-debugging-address=127.0.0.1");
     expect(launchArguments.args).toContain("--remote-allow-origins=*");
     expect(launchArguments.args).toContain("--enable-unsafe-extension-debugging");
+    expect(launchArguments.args).not.toContain("--enable-automation");
     expect(launchArguments.ignoreDefaultArgs).toContain("--disable-extensions");
+    expect(launchArguments.ignoreDefaultArgs).toContain("--enable-automation");
     expect(createCdpUrl(54321)).toBe("http://127.0.0.1:54321");
   });
 
@@ -120,9 +144,94 @@ describe("launchBrowser", () => {
           "--remote-allow-origins=*",
           "--enable-unsafe-extension-debugging",
         ]),
-        ignoreDefaultArgs: ["--disable-extensions"],
+        ignoreDefaultArgs: ["--disable-extensions", "--enable-automation"],
       }),
     );
+  });
+
+  it("installs fingerprint hardening with the profile identity", async () => {
+    const fake = createFakeContext();
+    launchPersistentContext.mockResolvedValue(fake.context);
+    const hardening = vi.fn(async () => ({ close: async () => undefined }));
+
+    await launchBrowserWithDependencies(
+      {
+        executablePath: "/chrome",
+        userDataDir: "/profile",
+        profileId: "p_aaaaaaaaaaaaaaaa",
+      },
+      {
+        allocateCdpPort: async () => 54321,
+        waitForCdpReady: async () => undefined,
+        installFingerprintHardening: hardening,
+      },
+    );
+
+    expect(hardening).toHaveBeenCalledWith({
+      cdpUrl: "http://127.0.0.1:54321",
+      profile: expect.objectContaining({ key: "p_aaaaaaaaaaaaaaaa" }),
+    });
+  });
+
+  it("derives the fingerprint key from the profile directory when profileId is absent", async () => {
+    const fake = createFakeContext();
+    launchPersistentContext.mockResolvedValue(fake.context);
+    const hardening = vi.fn(async () => ({ close: async () => undefined }));
+
+    await launchBrowserWithDependencies(
+      { executablePath: "/chrome", userDataDir: "/profile" },
+      {
+        allocateCdpPort: async () => 54321,
+        waitForCdpReady: async () => undefined,
+        installFingerprintHardening: hardening,
+      },
+    );
+
+    expect(hardening).toHaveBeenCalledWith({
+      cdpUrl: "http://127.0.0.1:54321",
+      profile: expect.objectContaining({ key: "/profile" }),
+    });
+  });
+
+  it("closes the context when fingerprint hardening fails", async () => {
+    const fake = createFakeContext();
+    launchPersistentContext.mockResolvedValue(fake.context);
+
+    await expect(
+      launchBrowserWithDependencies(
+        { executablePath: "/chrome", userDataDir: "/profile" },
+        {
+          allocateCdpPort: async () => 54321,
+          waitForCdpReady: async () => undefined,
+          installFingerprintHardening: async () => {
+            throw new Error("Fingerprint hardening failed.");
+          },
+        },
+      ),
+    ).rejects.toThrow("Fingerprint hardening failed");
+
+    expect(fake.closeCalls).toBe(1);
+  });
+
+  it("closes fingerprint hardening when the context closes", async () => {
+    const fake = createFakeContext();
+    launchPersistentContext.mockResolvedValue(fake.context);
+    const close = vi.fn(async () => undefined);
+
+    await launchBrowserWithDependencies(
+      { executablePath: "/chrome", userDataDir: "/profile" },
+      {
+        allocateCdpPort: async () => 54321,
+        waitForCdpReady: async () => undefined,
+        installFingerprintHardening: async () => ({ close }),
+      },
+    );
+
+    fake.emitClose();
+
+    await vi.waitFor(() => {
+      expect(close).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("closes the partial context when CDP readiness fails", async () => {

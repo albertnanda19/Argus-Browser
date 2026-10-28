@@ -1,5 +1,11 @@
 import { createServer } from "node:net";
 import type { BrowserContext } from "playwright-core";
+import {
+  createFingerprintProfile,
+  installFingerprintHardening,
+  type FingerprintHardening,
+  type FingerprintHardeningOptions,
+} from "./browser-stealth";
 
 export type BrowserLocator = {
   click(options: { readonly timeout: number }): Promise<void>;
@@ -23,6 +29,7 @@ export type BrowserSessionContext = {
 export type LaunchBrowserOptions = {
   readonly executablePath: string;
   readonly userDataDir: string;
+  readonly profileId?: string;
 };
 
 export type BrowserLaunchResult = {
@@ -40,6 +47,9 @@ export type CdpLaunchArguments = {
 export type LaunchBrowserDependencies = {
   readonly allocateCdpPort?: () => Promise<number>;
   readonly waitForCdpReady?: (cdpUrl: string) => Promise<void>;
+  readonly installFingerprintHardening?: (
+    options: FingerprintHardeningOptions,
+  ) => Promise<FingerprintHardening>;
 };
 
 const CDP_READY_TIMEOUT_MS = 5_000;
@@ -78,7 +88,7 @@ export function createCdpLaunchArguments(port: number): CdpLaunchArguments {
       "--remote-allow-origins=*",
       "--enable-unsafe-extension-debugging",
     ],
-    ignoreDefaultArgs: ["--disable-extensions"],
+    ignoreDefaultArgs: ["--disable-extensions", "--enable-automation"],
   };
 }
 
@@ -164,6 +174,14 @@ export async function launchBrowserWithDependencies(
 
   try {
     await (dependencies.waitForCdpReady ?? waitForCdpReady)(cdpUrl);
+    const hardening = await (dependencies.installFingerprintHardening ??
+      installFingerprintHardening)({
+      cdpUrl,
+      profile: createFingerprintProfile(options.profileId ?? options.userDataDir),
+    });
+    context.on("close", () => {
+      void hardening.close();
+    });
   } catch (error) {
     await withTimeout(context.close(), CDP_CLOSE_TIMEOUT_MS).catch(() => undefined);
     throw error;

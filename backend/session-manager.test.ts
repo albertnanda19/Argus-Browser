@@ -168,6 +168,7 @@ describe("start", () => {
       {
         executablePath: executablePath(),
         userDataDir: resolveProfileDir(appDataDir, profile.id),
+        profileId: profile.id,
       },
     ]);
 
