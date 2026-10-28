@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Profile } from "../shared/profile";
 import type { Session } from "../shared/session";
-import type { ArgusRuntime } from "./api-runtime";
+import { ActivityLogPanel } from "./ActivityLogPanel";
 import { ApprovalQueue } from "./ApprovalQueue";
+import {
+  appendActivityEntry,
+  createActivityEntry,
+  type ActivityEntry,
+} from "./activity-log-state";
+import type { ArgusRuntime } from "./api-runtime";
 import { BrowserSetupSection } from "./BrowserSetupSection";
 import { isAbortError } from "./cockpit-state";
 import { ProfileSection } from "./ProfileSection";
@@ -56,6 +62,9 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
     ReadonlyMap<string, TaskEventOverlay>
   >(() => new Map());
   const [reconnectVersion, setReconnectVersion] = useState(0);
+  const [activityEntries, setActivityEntries] = useState<
+    readonly ActivityEntry[]
+  >([]);
   const deduplicatorRef = useRef(createEventIdDeduplicator());
   const lastEventIdRef = useRef<string | undefined>(undefined);
   const hasConnectedRef = useRef(false);
@@ -115,6 +124,11 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
               continue;
             }
 
+            const activityEntry = createActivityEntry(entry);
+
+            setActivityEntries((current) =>
+              appendActivityEntry(current, activityEntry),
+            );
             setTaskEvents((current) => applyTaskEvent(current, entry.event));
           }
         } catch (error: unknown) {
@@ -183,6 +197,7 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
               taskEvents={taskEvents}
               reconnectVersion={reconnectVersion}
             />
+            <ActivityLogPanel entries={activityEntries} />
             <BrowserSetupSection runtime={runtime} />
           </>
         ) : (

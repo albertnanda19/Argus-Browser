@@ -155,6 +155,43 @@ export const texts = {
     createdLabel: "Dibuat",
     durationLabel: (value: string) => `Durasi ${value}`,
   },
+  activity: {
+    heading: "Log aktivitas",
+    filterLabel: "Filter tipe",
+    searchLabel: "Cari aktivitas",
+    searchPlaceholder: "Cari teks, target, atau ID task…",
+    count: (count: number) => `${count} aktivitas`,
+    empty: "Belum ada aktivitas.",
+    emptyFiltered: "Tidak ada aktivitas yang cocok.",
+    filter: {
+      all: "Semua",
+    },
+    kind: {
+      step: "Langkah",
+      approval: "Persetujuan",
+      completed: "Selesai",
+      failed: "Gagal",
+      cancelled: "Dibatalkan",
+    },
+    line: {
+      agentStep: (index: number, action: string, status: string, target: string) =>
+        target === ""
+          ? `Langkah ${index} · ${action} · ${status}`
+          : `Langkah ${index} · ${action} · ${status} · ${target}`,
+      manualStep: (action: string, page: string | null) =>
+        page === null
+          ? `Aksi manual · ${action}`
+          : `Aksi manual · ${action} · ${page}`,
+      approval: (action: string, category: string, target: string) =>
+        target === ""
+          ? `Persetujuan diminta · ${action} · ${category}`
+          : `Persetujuan diminta · ${action} · ${category} · ${target}`,
+      completed: "Task selesai.",
+      completedWithSummary: (summary: string) => `Task selesai · ${summary}`,
+      failed: (reason: string) => `Task gagal · ${reason}`,
+      cancelled: (reason: string) => `Task dibatalkan · ${reason}`,
+    },
+  },
   approval: {
     heading: (count: number) => `Antrean persetujuan (${count})`,
     truncated:

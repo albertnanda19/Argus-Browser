@@ -980,3 +980,100 @@ body {
 .history-session {
   overflow-wrap: anywhere;
 }
+
+.activity-panel {
+  gap: 0.6rem;
+}
+
+.activity-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.activity-select,
+.activity-search {
+  padding: 0.4rem 0.55rem;
+  font-size: 0.9rem;
+}
+
+.activity-count {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 16rem;
+  margin: 0;
+  padding: 0.15rem 0.35rem 0.15rem 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.activity-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  background-color: #0f172a;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 4rem;
+}
+
+.activity-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-time {
+  color: #94a3b8;
+}
+
+.activity-kind {
+  font-weight: 600;
+}
+
+.activity-kind[data-kind="step"] {
+  color: #38bdf8;
+}
+
+.activity-kind[data-kind="approval"] {
+  color: #facc15;
+}
+
+.activity-kind[data-kind="completed"] {
+  color: #86efac;
+}
+
+.activity-kind[data-kind="failed"] {
+  color: #fca5a5;
+}
+
+.activity-kind[data-kind="cancelled"] {
+  color: #cbd5e1;
+}
+
+.activity-task {
+  margin-left: auto;
+  overflow-wrap: anywhere;
+}
+
+.activity-text {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
