@@ -14,9 +14,20 @@ export type BrowserLocator = {
 };
 
 export type BrowserPage = {
-  goto(url: string, options: { readonly timeout: number }): Promise<unknown>;
+  goto(
+    url: string,
+    options: {
+      readonly timeout: number;
+      readonly waitUntil?: "load" | "domcontentloaded" | "networkidle" | "commit";
+    },
+  ): Promise<unknown>;
   url(): string;
   locator(selector: string): BrowserLocator;
+  evaluate?(pageFunction: () => unknown): Promise<unknown>;
+  waitForLoadState?(
+    state: "networkidle",
+    options?: { readonly timeout?: number },
+  ): Promise<void>;
 };
 
 export type BrowserSessionContext = {
