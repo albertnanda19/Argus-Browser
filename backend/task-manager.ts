@@ -55,6 +55,8 @@ export type TaskService = {
   createTask(sessionId: string, input: CreateTaskRequest, idempotencyKey: string): Task;
   getTask(taskId: string): Task | null;
   listBySession(sessionId: string): Task[];
+  listTasks(): Task[];
+  listApprovals(): Approval[];
   cancelTask(taskId: string): Task;
   startTask(taskId: string): Task;
   requestApproval(taskId: string, input: ApprovalRequestInput): Approval;
@@ -181,6 +183,14 @@ class TaskManagerImpl implements TaskService {
       .map((task) => ({ ...task }));
   }
 
+  listTasks(): Task[] {
+    return [...this.tasks.values()].map((task) => ({ ...task }));
+  }
+
+  listApprovals(): Approval[] {
+    return [...this.approvals.values()].map((approval) => ({ ...approval }));
+  }
+
   getApproval(approvalId: string): Approval | null {
     const approval = this.approvals.get(approvalId);
     return approval === undefined ? null : { ...approval };
@@ -200,8 +210,10 @@ class TaskManagerImpl implements TaskService {
       id: createApprovalId(),
       taskId,
       action: input.action,
+      target: input.target,
       payload: input.payload,
       decision: "pending",
+      requestedAt: at,
       decidedAt: null,
     });
     const event = approvalRequestedEventSchema.parse({

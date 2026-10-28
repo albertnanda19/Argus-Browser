@@ -9,6 +9,7 @@ import {
   type AgentStepListResponse,
 } from "./agent-step";
 import {
+  approvalListResponseSchema,
   approvalResponseSchema,
   browserStateResponseSchema,
   profileListResponseSchema,
@@ -16,8 +17,11 @@ import {
   profileResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
+  taskListResponseSchema,
   taskResponseSchema,
   type ApprovalDecisionRequest,
+  type ApprovalListQuery,
+  type ApprovalListResponse,
   type ApprovalResponse,
   type CreateProfileRequest,
   type CreateSessionRequest,
@@ -28,6 +32,8 @@ import {
   type ProfileResponse,
   type SessionListResponse,
   type SessionResponse,
+  type TaskListQuery,
+  type TaskListResponse,
   type TaskResponse,
 } from "./api";
 import type { ChromeInstallerState } from "./chrome-installer";
@@ -57,6 +63,8 @@ type RequestOptions = {
   readonly method: HttpMethod;
   readonly body?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
+  readonly accept?: string;
+  readonly signal?: AbortSignal;
 };
 
 type ClientConfig = {
@@ -90,6 +98,10 @@ export type StreamEventsOptions = {
   readonly signal?: AbortSignal;
 };
 
+export type ThumbnailOptions = {
+  readonly signal?: AbortSignal;
+};
+
 export type ArgusEvent = {
   readonly id: string;
   readonly event: DomainEvent;
@@ -115,8 +127,10 @@ export type ArgusClient = {
     start(input: CreateSessionRequest): Promise<SessionResponse>;
     get(id: string): Promise<SessionResponse>;
     close(id: string): Promise<void>;
+    thumbnail(id: string, options?: ThumbnailOptions): Promise<Blob>;
   };
   readonly tasks: {
+    list(query?: Partial<TaskListQuery>): Promise<TaskListResponse>;
     create(
       sessionId: string,
       input: CreateTaskRequest,
@@ -132,6 +146,9 @@ export type ArgusClient = {
       id: string,
       input: ApprovalDecisionRequest,
     ): Promise<ApprovalResponse>;
+  };
+  readonly approvals: {
+    list(query?: Partial<ApprovalListQuery>): Promise<ApprovalListResponse>;
   };
   readonly actions: {
     run(sessionId: string, input: ActionRequest): Promise<ActionResponse>;
@@ -165,21 +182,40 @@ function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
 
-function paginationQuery(query: Partial<PaginationQuery> | undefined): string {
-  if (query === undefined) {
-    return "";
-  }
-
+function queryString(
+  values: Readonly<Record<string, string | number | undefined>>,
+): string {
   const params = new URLSearchParams();
-  if (query.page !== undefined) {
-    params.set("page", String(query.page));
-  }
-  if (query.page_size !== undefined) {
-    params.set("page_size", String(query.page_size));
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) {
+      params.set(key, String(value));
+    }
   }
 
   const value = params.toString();
   return value === "" ? "" : `?${value}`;
+}
+
+function paginationQuery(query: Partial<PaginationQuery> | undefined): string {
+  return queryString({ page: query?.page, page_size: query?.page_size });
+}
+
+function taskListQuery(query: Partial<TaskListQuery> | undefined): string {
+  return queryString({
+    page: query?.page,
+    page_size: query?.page_size,
+    sessionId: query?.sessionId,
+    status: query?.status,
+  });
+}
+
+function approvalListQuery(query: Partial<ApprovalListQuery> | undefined): string {
+  return queryString({
+    page: query?.page,
+    page_size: query?.page_size,
+    decision: query?.decision,
+    taskId: query?.taskId,
+  });
 }
 
 async function toApiError(response: Response): Promise<ArgusApiError> {
@@ -200,7 +236,7 @@ async function send(
 ): Promise<Response> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${config.token}`,
-    Accept: "application/json",
+    Accept: options.accept ?? "application/json",
   };
 
   if (options.body !== undefined) {
@@ -216,6 +252,7 @@ async function send(
       method: options.method,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: options.signal,
     });
   } catch (error) {
     if (isAbortError(error)) {
@@ -255,6 +292,28 @@ async function requestVoid(
   options: RequestOptions,
 ): Promise<void> {
   await send(config, path, options);
+}
+
+async function requestThumbnail(
+  config: ClientConfig,
+  path: string,
+  options: RequestOptions,
+): Promise<Blob> {
+  const response = await send(config, path, { ...options, accept: "image/jpeg" });
+  const contentType = response.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase();
+
+  if (contentType !== "image/jpeg") {
+    throw new ArgusApiError(INVALID_RESPONSE_MESSAGE, response.status, null);
+  }
+
+  try {
+    return await response.blob();
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    throw new ArgusApiError(INVALID_RESPONSE_MESSAGE, response.status, null);
+  }
 }
 
 async function requestBrowserState(
@@ -505,8 +564,21 @@ export function createArgusClient(options: ArgusClientOptions): ArgusClient {
         requestVoid(config, `/sessions/${encodeURIComponent(id)}`, {
           method: "DELETE",
         }),
+      thumbnail: (id, thumbnailOptions) =>
+        requestThumbnail(
+          config,
+          `/sessions/${encodeURIComponent(id)}/thumbnail`,
+          { method: "GET", signal: thumbnailOptions?.signal },
+        ),
     },
     tasks: {
+      list: (query) =>
+        request(
+          config,
+          taskListResponseSchema,
+          `/tasks${taskListQuery(query)}`,
+          { method: "GET" },
+        ),
       create: (sessionId, input, createOptions) =>
         request(
           config,
@@ -551,6 +623,15 @@ export function createArgusClient(options: ArgusClientOptions): ArgusClient {
           actionResponseSchema,
           `/sessions/${encodeURIComponent(sessionId)}/actions`,
           { method: "POST", body: input },
+        ),
+    },
+    approvals: {
+      list: (query) =>
+        request(
+          config,
+          approvalListResponseSchema,
+          `/approvals${approvalListQuery(query)}`,
+          { method: "GET" },
         ),
     },
     providers: {

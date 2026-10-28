@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   approvalDecisionRequestSchema,
+  approvalListResponseSchema,
   approvalResponseSchema,
   browserStateResponseSchema,
   createProfileRequestSchema,
@@ -14,6 +15,7 @@ import {
   profileResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
+  taskListResponseSchema,
   taskResponseSchema,
 } from "./api";
 import {
@@ -33,7 +35,13 @@ import {
   providerResponseSchema,
 } from "./provider";
 import { sessionIdSchema, sessionSchema } from "./session";
-import { approvalSchema, taskIdSchema, taskSchema } from "./task";
+import {
+  approvalDecisionSchema,
+  approvalSchema,
+  taskIdSchema,
+  taskSchema,
+  taskStatusSchema,
+} from "./task";
 
 type JsonSchema = Record<string, unknown>;
 
@@ -105,6 +113,7 @@ const COMPONENTS: readonly ComponentDefinition[] = [
   { name: "CreateSessionRequest", schema: createSessionRequestSchema, io: "input" },
   { name: "Task", schema: taskSchema, io: "output" },
   { name: "TaskResponse", schema: taskResponseSchema, io: "output" },
+  { name: "TaskListResponse", schema: taskListResponseSchema, io: "output" },
   { name: "AgentStep", schema: agentStepSchema, io: "output" },
   { name: "AgentStepResult", schema: agentStepResultSchema, io: "output" },
   { name: "AgentStepVerification", schema: agentStepVerificationSchema, io: "output" },
@@ -112,6 +121,7 @@ const COMPONENTS: readonly ComponentDefinition[] = [
   { name: "CreateTaskRequest", schema: createTaskRequestSchema, io: "input" },
   { name: "Approval", schema: approvalSchema, io: "output" },
   { name: "ApprovalResponse", schema: approvalResponseSchema, io: "output" },
+  { name: "ApprovalListResponse", schema: approvalListResponseSchema, io: "output" },
   { name: "ApprovalDecisionRequest", schema: approvalDecisionRequestSchema, io: "input" },
   { name: "ActionRequest", schema: actionRequestSchema, io: "input" },
   { name: "ActionResult", schema: actionResultSchema, io: "output" },
@@ -246,6 +256,38 @@ const TASK_ID_QUERY_PARAMETER: OpenApiParameter = {
   in: "query",
   required: false,
   description: "Filter event berdasarkan id task.",
+  schema: inlineSchema(taskIdSchema, "input"),
+};
+
+const TASK_SESSION_FILTER_PARAMETER: OpenApiParameter = {
+  name: "sessionId",
+  in: "query",
+  required: false,
+  description: "Filter task berdasarkan id sesi.",
+  schema: inlineSchema(sessionIdSchema, "input"),
+};
+
+const TASK_STATUS_FILTER_PARAMETER: OpenApiParameter = {
+  name: "status",
+  in: "query",
+  required: false,
+  description: "Filter task berdasarkan status.",
+  schema: inlineSchema(taskStatusSchema, "input"),
+};
+
+const APPROVAL_DECISION_FILTER_PARAMETER: OpenApiParameter = {
+  name: "decision",
+  in: "query",
+  required: false,
+  description: "Filter approval berdasarkan keputusan.",
+  schema: inlineSchema(approvalDecisionSchema, "input"),
+};
+
+const APPROVAL_TASK_FILTER_PARAMETER: OpenApiParameter = {
+  name: "taskId",
+  in: "query",
+  required: false,
+  description: "Filter approval berdasarkan id task.",
   schema: inlineSchema(taskIdSchema, "input"),
 };
 
@@ -483,6 +525,29 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
       },
     },
   },
+  "/sessions/{id}/thumbnail": {
+    get: {
+      operationId: "getSessionThumbnail",
+      summary: "Cuplikan viewport sesi",
+      tags: ["Sessions"],
+      parameters: [SESSION_ID_PARAMETER],
+      responses: {
+        "200": {
+          description: "Cuplikan JPEG viewport sesi.",
+          content: {
+            "image/jpeg": {
+              schema: { type: "string", contentMediaType: "image/jpeg" },
+            },
+          },
+        },
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
+        "409": CONFLICT,
+        "500": INTERNAL_ERROR,
+      },
+    },
+  },
   "/sessions/{id}/actions": {
     post: {
       operationId: "executeAction",
@@ -500,6 +565,23 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
       },
     },
   },
+  "/tasks": {
+    get: {
+      operationId: "listTasks",
+      summary: "Daftar task dengan paginasi dan filter",
+      tags: ["Tasks"],
+      parameters: [
+        ...PAGINATION_PARAMETERS,
+        TASK_SESSION_FILTER_PARAMETER,
+        TASK_STATUS_FILTER_PARAMETER,
+      ],
+      responses: {
+        "200": jsonResponse("Daftar task.", "TaskListResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+      },
+    },
+  },
   "/tasks/{id}": {
     get: {
       operationId: "getTask",
@@ -511,6 +593,23 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
         "400": BAD_REQUEST,
         "401": UNAUTHORIZED,
         "404": NOT_FOUND,
+      },
+    },
+  },
+  "/approvals": {
+    get: {
+      operationId: "listApprovals",
+      summary: "Daftar approval dengan paginasi dan filter",
+      tags: ["Approvals"],
+      parameters: [
+        ...PAGINATION_PARAMETERS,
+        APPROVAL_DECISION_FILTER_PARAMETER,
+        APPROVAL_TASK_FILTER_PARAMETER,
+      ],
+      responses: {
+        "200": jsonResponse("Daftar approval.", "ApprovalListResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
       },
     },
   },

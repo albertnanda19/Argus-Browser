@@ -7,6 +7,8 @@ import {
 } from "../shared/agent-step";
 import {
   approvalDecisionRequestSchema,
+  approvalListQuerySchema,
+  approvalListResponseSchema,
   approvalResponseSchema,
   browserStateResponseSchema,
   createProfileRequestSchema,
@@ -20,6 +22,8 @@ import {
   profileResponseSchema,
   sessionListResponseSchema,
   sessionResponseSchema,
+  taskListQuerySchema,
+  taskListResponseSchema,
   taskResponseSchema,
   type PaginationQuery,
 } from "../shared/api";
@@ -41,10 +45,12 @@ import { ChromeFailure } from "./chrome-errors";
 import { isAuthorized } from "./auth";
 import { handleKnownError, INTERNAL_ERROR_DETAIL, problemResponse } from "./api-problem";
 import type { ActionService } from "./action-manager";
+import type { BrowserSessionContext } from "./browser-launcher";
 import type { EventBus } from "./event-bus";
 import { createEventStream, type EventStreamRegistry } from "./event-stream";
 import { createProfileLock } from "./profile-lock";
 import type { TaskService } from "./task-manager";
+import { capturePageThumbnail } from "./thumbnail";
 
 const ACTIVE_INSTALL_STATUSES = new Set<ChromeInstallerState["status"]>([
   "downloading",
@@ -76,6 +82,7 @@ export type SessionService = {
   start(profileId: string): Promise<Session>;
   listActive(): Session[];
   get(sessionId: string): Session | null;
+  getContext?(sessionId: string): BrowserSessionContext | null;
   close(sessionId: string): Promise<Session>;
 };
 
@@ -170,10 +177,20 @@ function paginate<T>(items: readonly T[], page: number, pageSize: number) {
   };
 }
 
+function compareTimeThenIdDesc<T extends { readonly id: string }>(
+  left: T,
+  right: T,
+  timeOf: (item: T) => string,
+): number {
+  const timeOrder = timeOf(right).localeCompare(timeOf(left));
+  return timeOrder !== 0 ? timeOrder : right.id.localeCompare(left.id);
+}
+
 export function createApp(options: AppOptions): Hono {
   const app = new Hono();
   const openApiDocument = createOpenApiDocument();
   const profileLock = createProfileLock();
+  const thumbnailLock = createProfileLock();
   const eventStream = createEventStream({
     events: options.events,
     connections: options.eventConnections,
@@ -430,6 +447,44 @@ export function createApp(options: AppOptions): Hono {
     return c.json(sessionResponseSchema.parse({ data: session }), 200);
   });
 
+  app.get("/v1/sessions/:id/thumbnail", async (c) => {
+    const parsedId = sessionIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id sesi tidak valid.");
+    }
+
+    if (options.sessions.get(parsedId.data) === null) {
+      return problemResponse(c, 404, "Sesi tidak ditemukan.");
+    }
+
+    const context = options.sessions.getContext?.(parsedId.data) ?? null;
+    if (context === null) {
+      return problemResponse(c, 409, "Sesi belum siap menampilkan cuplikan.");
+    }
+
+    const page = context.pages().at(-1);
+    if (page === undefined) {
+      return problemResponse(c, 409, "Sesi belum memiliki halaman.");
+    }
+
+    try {
+      const jpeg = await thumbnailLock.run(parsedId.data, () =>
+        capturePageThumbnail({ context, page }),
+      );
+      return c.body(jpeg, 200, {
+        "Content-Type": "image/jpeg",
+        "Cache-Control": "no-store",
+      });
+    } catch (error) {
+      console.warn(
+        `Session thumbnail failed: ${parsedId.data}: ${
+          error instanceof Error ? error.name : "unknown"
+        }`,
+      );
+      return problemResponse(c, 500, "Cuplikan halaman gagal dibuat.");
+    }
+  });
+
   app.delete("/v1/sessions/:id", async (c) => {
     const parsedId = sessionIdSchema.safeParse(c.req.param("id"));
     if (!parsedId.success) {
@@ -486,6 +541,27 @@ export function createApp(options: AppOptions): Hono {
     } catch (error) {
       return handleKnownError(c, error);
     }
+  });
+
+  app.get("/v1/tasks", (c) => {
+    const parsedQuery = taskListQuerySchema.safeParse(c.req.query());
+    if (!parsedQuery.success) {
+      return problemResponse(c, 400, "Parameter daftar task tidak valid.");
+    }
+
+    const { page, page_size, sessionId, status } = parsedQuery.data;
+    const tasks = options.tasks
+      .listTasks()
+      .filter(
+        (task) =>
+          (sessionId === undefined || task.sessionId === sessionId) &&
+          (status === undefined || task.status === status),
+      )
+      .sort((left, right) => compareTimeThenIdDesc(left, right, (task) => task.createdAt));
+    return c.json(
+      taskListResponseSchema.parse(paginate(tasks, page, page_size)),
+      200,
+    );
   });
 
   app.get("/v1/tasks/:id", (c) => {
@@ -563,6 +639,29 @@ export function createApp(options: AppOptions): Hono {
     } catch (error) {
       return handleKnownError(c, error);
     }
+  });
+
+  app.get("/v1/approvals", (c) => {
+    const parsedQuery = approvalListQuerySchema.safeParse(c.req.query());
+    if (!parsedQuery.success) {
+      return problemResponse(c, 400, "Parameter daftar approval tidak valid.");
+    }
+
+    const { page, page_size, decision, taskId } = parsedQuery.data;
+    const approvals = options.tasks
+      .listApprovals()
+      .filter(
+        (approval) =>
+          (decision === undefined || approval.decision === decision) &&
+          (taskId === undefined || approval.taskId === taskId),
+      )
+      .sort((left, right) =>
+        compareTimeThenIdDesc(left, right, (approval) => approval.requestedAt),
+      );
+    return c.json(
+      approvalListResponseSchema.parse(paginate(approvals, page, page_size)),
+      200,
+    );
   });
 
   app.get("/v1/events", (c) => {

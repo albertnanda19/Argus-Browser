@@ -330,8 +330,11 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
         if (method === "DOM.getDocument") {
           return { root: { nodeId: 1 } };
         }
-        if (method === "DOM.querySelector") {
-          return { nodeId: 2 };
+        if (method === "DOM.performSearch") {
+          return { searchId: "search-1" };
+        }
+        if (method === "DOM.getSearchResults") {
+          return { nodeIds: [2] };
         }
         return {};
       },

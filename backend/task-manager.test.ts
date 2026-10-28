@@ -156,19 +156,24 @@ describe("task state machine", () => {
       category: "send_message",
     });
     expect(approval.id).toMatch(/^a_[0-9a-f]{16}$/);
+    expect(approval.target).toBe("#kirim");
     expect(approval.decision).toBe("pending");
+    expect(approval.requestedAt).toBe("2026-10-25T10:00:00.000Z");
     expect(approval.decidedAt).toBeNull();
     expect(approval.payload).toEqual({
       selector: "#kirim",
       highlighted: true,
       category: "send_message",
     });
+    expect(harness.tasks.listApprovals()).toEqual([approval]);
     expect(harness.tasks.getTask(task.id)?.status).toBe("waiting_approval");
 
     harness.advance(1_000);
     const resolved = harness.tasks.resolveApproval(task.id, { approve: true });
     expect(resolved.task.status).toBe("running");
     expect(resolved.approval.decision).toBe("approved");
+    expect(resolved.approval.target).toBe("#kirim");
+    expect(resolved.approval.requestedAt).toBe(approval.requestedAt);
     expect(resolved.approval.decidedAt).toBe("2026-10-25T10:00:01.000Z");
     expect(harness.tasks.getApproval(approval.id)?.decision).toBe("approved");
 

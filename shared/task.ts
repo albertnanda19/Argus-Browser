@@ -40,8 +40,10 @@ export const approvalSchema = z.strictObject({
   id: approvalIdSchema,
   taskId: taskIdSchema,
   action: z.string().min(1),
+  target: z.string().min(1).max(300),
   payload: jsonObjectSchema,
   decision: approvalDecisionSchema,
+  requestedAt: z.iso.datetime({ offset: false }),
   decidedAt: z.iso.datetime({ offset: false }).nullable(),
 });
 

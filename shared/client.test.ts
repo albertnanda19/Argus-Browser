@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { ActionResponse } from "./action";
 import type { AgentStep, AgentStepListResponse } from "./agent-step";
 import type {
+  ApprovalListResponse,
   ApprovalResponse,
   ProfileListResponse,
   ProfileResponse,
   SessionListResponse,
   SessionResponse,
+  TaskListResponse,
   TaskResponse,
 } from "./api";
 import type { ChromeInstallerState } from "./chrome-installer";
@@ -128,14 +130,32 @@ const approval: Approval = {
   id: approvalId,
   taskId,
   action: "send_email",
+  target: "sales@example.com",
   payload: { to: "sales@example.com" },
   decision: "approved",
+  requestedAt: timestamp,
   decidedAt: timestamp,
 };
 
 const approvalResponse: ApprovalResponse = {
   data: { task: waitingTask, approval },
 };
+
+const taskList: TaskListResponse = {
+  data: [task, waitingTask],
+  total: 2,
+  page: 1,
+  page_size: 20,
+};
+
+const approvalList: ApprovalListResponse = {
+  data: [approval],
+  total: 1,
+  page: 1,
+  page_size: 20,
+};
+
+const thumbnailBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
 
 const actionResponse: ActionResponse = {
   data: { action: "navigate", url: "https://example.com/" },
@@ -239,6 +259,14 @@ function routeResponse(method: string, pathname: string): Response {
   if (key === "POST /v1/sessions") return jsonResponse(sessionResponse, 201);
   if (key === `GET /v1/sessions/${sessionId}`) return jsonResponse(sessionResponse);
   if (key === `DELETE /v1/sessions/${sessionId}`) return emptyResponse();
+  if (key === `GET /v1/sessions/${sessionId}/thumbnail`) {
+    return new Response(thumbnailBytes, {
+      status: 200,
+      headers: { "Content-Type": "image/jpeg" },
+    });
+  }
+  if (key === "GET /v1/tasks") return jsonResponse(taskList);
+  if (key === "GET /v1/approvals") return jsonResponse(approvalList);
   if (key === `POST /v1/sessions/${sessionId}/tasks`) {
     return jsonResponse(taskResponse, 202);
   }
@@ -370,17 +398,25 @@ describe("createArgusClient", () => {
     await client.sessions.start({ profileId });
     await client.sessions.get(sessionId);
     await client.sessions.close(sessionId);
+    const thumbnail = await client.sessions.thumbnail(sessionId);
     await client.tasks.create(
       sessionId,
       { goal: "Cari kontak", outputSchema: { email: "string" } },
       { idempotencyKey },
     );
     await client.tasks.get(taskId);
+    await client.tasks.list({ page: 2, page_size: 5, sessionId, status: "queued" });
     await client.tasks.listSteps(taskId);
     await client.tasks.cancel(taskId);
     await client.tasks.resolveApproval(taskId, {
       approve: false,
       reason: "Target salah.",
+    });
+    await client.approvals.list({
+      page: 2,
+      page_size: 5,
+      decision: "pending",
+      taskId,
     });
     await client.actions.run(sessionId, { action: "click", selector: "#submit" });
     const providerResult = await client.providers.get();
@@ -401,11 +437,14 @@ describe("createArgusClient", () => {
       ["POST", "/v1/sessions"],
       ["GET", `/v1/sessions/${sessionId}`],
       ["DELETE", `/v1/sessions/${sessionId}`],
+      ["GET", `/v1/sessions/${sessionId}/thumbnail`],
       ["POST", `/v1/sessions/${sessionId}/tasks`],
       ["GET", `/v1/tasks/${taskId}`],
+      ["GET", "/v1/tasks"],
       ["GET", `/v1/tasks/${taskId}/steps`],
       ["POST", `/v1/tasks/${taskId}/cancel`],
       ["POST", `/v1/tasks/${taskId}/approval`],
+      ["GET", "/v1/approvals"],
       ["POST", `/v1/sessions/${sessionId}/actions`],
       ["GET", "/v1/providers"],
       ["PUT", "/v1/providers"],
@@ -426,7 +465,11 @@ describe("createArgusClient", () => {
       expect(url.origin).toBe("http://127.0.0.1:4321");
       expect(url.pathname).toBe(expected[1]);
       expect(headers.get("Authorization")).toBe(`Bearer ${token}`);
-      expect(headers.get("Accept")).toBe("application/json");
+      expect(headers.get("Accept")).toBe(
+        url.pathname === `/v1/sessions/${sessionId}/thumbnail`
+          ? "image/jpeg"
+          : "application/json",
+      );
       expect(url.toString()).not.toContain(token);
       expect(String(call.init?.body ?? "")).not.toContain(token);
 
@@ -449,6 +492,7 @@ describe("createArgusClient", () => {
     expect(savedPolicy).toEqual({ data: profilePolicy });
     expect(providerResult).toEqual(providerConfig);
     expect(savedProvider).toEqual(providerConfig);
+    expect(new Uint8Array(await thumbnail.arrayBuffer())).toEqual(thumbnailBytes);
   });
 
   it("exposes only the documented provider methods", () => {
@@ -467,6 +511,7 @@ describe("createArgusClient", () => {
     ]);
     expect(Object.keys(client).sort()).toEqual([
       "actions",
+      "approvals",
       "browser",
       "events",
       "health",
@@ -583,6 +628,78 @@ describe("createArgusClient", () => {
     expect(headers.get("Accept")).toBe("application/json");
   });
 
+  it("validates task and approval lists and forwards filters", async () => {
+    const stub = createFetchStub(({ input }) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/tasks") {
+        expect(url.search).toBe(
+          `?page=2&page_size=5&sessionId=${sessionId}&status=queued`,
+        );
+        return jsonResponse(taskList);
+      }
+      expect(url.pathname).toBe("/v1/approvals");
+      expect(url.search).toBe(
+        `?page=3&page_size=10&decision=pending&taskId=${taskId}`,
+      );
+      return jsonResponse(approvalList);
+    });
+    const client = createClient(stub.fetch);
+
+    const tasks = await client.tasks.list({
+      page: 2,
+      page_size: 5,
+      sessionId,
+      status: "queued",
+    });
+    const approvals = await client.approvals.list({
+      page: 3,
+      page_size: 10,
+      decision: "pending",
+      taskId,
+    });
+
+    expect(tasks).toEqual(taskList);
+    expect(approvals).toEqual(approvalList);
+  });
+
+  it("returns a thumbnail blob and forwards the abort signal", async () => {
+    const controller = new AbortController();
+    const stub = createFetchStub(({ init }) => {
+      expect(init?.signal).toBe(controller.signal);
+      return new Response(thumbnailBytes, {
+        status: 200,
+        headers: { "Content-Type": "image/jpeg; charset=binary" },
+      });
+    });
+    const client = createClient(stub.fetch);
+
+    const blob = await client.sessions.thumbnail(sessionId, {
+      signal: controller.signal,
+    });
+
+    expect(blob.type).toContain("image/jpeg");
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(thumbnailBytes);
+  });
+
+  it("rejects a thumbnail response with a wrong content type", async () => {
+    const stub = createFetchStub(
+      () =>
+        new Response(thumbnailBytes, {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    const client = createClient(stub.fetch);
+
+    const error = requireArgusError(
+      await captureError(() => client.sessions.thumbnail(sessionId)),
+    );
+
+    expect(error.status).toBe(200);
+    expect(error.problem).toBeNull();
+    expect(error.message).toBe("Respons Argus tidak valid.");
+  });
+
   it("rejects an invalid profile policy response", async () => {
     const stub = createFetchStub(() =>
       jsonResponse({
@@ -648,12 +765,13 @@ describe("createArgusClient", () => {
       "cancel",
       "create",
       "get",
+      "list",
       "listSteps",
       "resolveApproval",
     ]);
   });
 
-  it("exposes 23 documented methods", () => {
+  it("exposes 26 documented methods", () => {
     const stub = createFetchStub(() => jsonResponse(taskResponse));
     const client = createClient(stub.fetch);
     const methods = [
@@ -662,12 +780,13 @@ describe("createArgusClient", () => {
       ...Object.values(client.profiles),
       ...Object.values(client.sessions),
       ...Object.values(client.tasks),
+      ...Object.values(client.approvals),
       ...Object.values(client.actions),
       ...Object.values(client.providers),
       ...Object.values(client.events),
     ];
 
-    expect(methods.filter((value) => typeof value === "function")).toHaveLength(23);
+    expect(methods.filter((value) => typeof value === "function")).toHaveLength(26);
   });
 
   it("does not read a body for 204 responses", async () => {

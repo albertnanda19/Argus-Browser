@@ -41,12 +41,15 @@ const EXPECTED_OPERATIONS = [
   "POST /sessions",
   "GET /sessions/{id}",
   "DELETE /sessions/{id}",
+  "GET /sessions/{id}/thumbnail",
   "POST /sessions/{id}/tasks",
   "POST /sessions/{id}/actions",
+  "GET /tasks",
   "GET /tasks/{id}",
   "GET /tasks/{id}/steps",
   "POST /tasks/{id}/cancel",
   "POST /tasks/{id}/approval",
+  "GET /approvals",
   "GET /events",
   "GET /openapi.json",
 ];
@@ -188,8 +191,8 @@ describe("OpenAPI document", () => {
     const document = createOpenApiDocument();
     const operations = allOperations().map(({ method, path }) => `${method.toUpperCase()} ${path}`);
 
-    expect(Object.keys(document.paths)).toHaveLength(18);
-    expect(operations).toHaveLength(24);
+    expect(Object.keys(document.paths)).toHaveLength(21);
+    expect(operations).toHaveLength(27);
     expect(new Set(operations)).toEqual(new Set(EXPECTED_OPERATIONS));
   });
 
@@ -250,7 +253,21 @@ describe("OpenAPI document", () => {
     const schemas = createOpenApiDocument().components.schemas;
 
     expect(schemas.Task).toEqual(generatedJsonSchema(taskSchema, "output"));
+    expect(schemas.TaskListResponse).toMatchObject({
+      type: "object",
+      required: ["data", "total", "page", "page_size"],
+    });
+    expect(collectRefs(schemas.TaskListResponse)).toEqual([
+      "#/components/schemas/Task",
+    ]);
     expect(schemas.Approval).toEqual(generatedJsonSchema(approvalSchema, "output"));
+    expect(schemas.ApprovalListResponse).toMatchObject({
+      type: "object",
+      required: ["data", "total", "page", "page_size"],
+    });
+    expect(collectRefs(schemas.ApprovalListResponse)).toEqual([
+      "#/components/schemas/Approval",
+    ]);
     expect(schemas.Profile).toEqual(generatedJsonSchema(profileSchema, "output"));
     expect(schemas.Session).toEqual(generatedJsonSchema(sessionSchema, "output"));
     expect(schemas.Problem).toEqual(generatedJsonSchema(problemSchema, "output"));
@@ -274,7 +291,7 @@ describe("OpenAPI document", () => {
     expect(schemas.AgentStepListResponse).toEqual(
       agentComponents.AgentStepListResponse,
     );
-    expect(Object.keys(schemas)).toHaveLength(31);
+    expect(Object.keys(schemas)).toHaveLength(33);
   });
 
   it("documents profile policy reads and writes", () => {
@@ -402,6 +419,66 @@ describe("OpenAPI document", () => {
     expect(Object.keys(createOpenApiDocument().paths["/tasks/{id}/steps"] ?? {})).toEqual([
       "get",
     ]);
+  });
+
+  it("documents cockpit read queries and thumbnail responses", () => {
+    const document = createOpenApiDocument();
+    const tasks = operationAt("get", "/tasks");
+    const approvals = operationAt("get", "/approvals");
+    const thumbnail = operationAt("get", "/sessions/{id}/thumbnail");
+
+    expect(tasks.tags).toEqual(["Tasks"]);
+    expect(tasks.parameters?.map((parameter) => parameter.name)).toEqual([
+      "page",
+      "page_size",
+      "sessionId",
+      "status",
+    ]);
+    expect(tasks.responses["200"]).toEqual({
+      description: "Daftar task.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/TaskListResponse" },
+        },
+      },
+    });
+    expect(tasks.responses["400"]).toBeDefined();
+    expect(tasks.responses["401"]).toBeDefined();
+
+    expect(approvals.tags).toEqual(["Approvals"]);
+    expect(approvals.parameters?.map((parameter) => parameter.name)).toEqual([
+      "page",
+      "page_size",
+      "decision",
+      "taskId",
+    ]);
+    expect(approvals.responses["200"]).toEqual({
+      description: "Daftar approval.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/ApprovalListResponse" },
+        },
+      },
+    });
+    expect(approvals.responses["400"]).toBeDefined();
+    expect(approvals.responses["401"]).toBeDefined();
+
+    expect(thumbnail.tags).toEqual(["Sessions"]);
+    expect(thumbnail.parameters?.map((parameter) => parameter.name)).toEqual(["id"]);
+    expect(thumbnail.responses["200"]).toEqual({
+      description: "Cuplikan JPEG viewport sesi.",
+      content: {
+        "image/jpeg": {
+          schema: { type: "string", contentMediaType: "image/jpeg" },
+        },
+      },
+    });
+    for (const status of ["400", "401", "404", "409", "500"]) {
+      expect(thumbnail.responses[status], status).toBeDefined();
+    }
+    expect(document.components.schemas.Approval).toMatchObject({
+      required: expect.arrayContaining(["target", "requestedAt"]),
+    });
   });
 
   it("documents path id patterns", () => {

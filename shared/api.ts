@@ -2,8 +2,15 @@ import { z } from "zod";
 import { chromeInstallerStateSchema } from "./chrome-installer";
 import { profileIdSchema, profileNameSchema, profileSchema } from "./profile";
 import { profilePolicySchema } from "./profile-policy";
-import { sessionSchema } from "./session";
-import { approvalSchema, jsonObjectSchema, taskSchema } from "./task";
+import { sessionIdSchema, sessionSchema } from "./session";
+import {
+  approvalDecisionSchema,
+  approvalSchema,
+  jsonObjectSchema,
+  taskIdSchema,
+  taskSchema,
+  taskStatusSchema,
+} from "./task";
 
 export const paginationQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -11,6 +18,20 @@ export const paginationQuerySchema = z.object({
 });
 
 export type PaginationQuery = z.infer<typeof paginationQuerySchema>;
+
+export const taskListQuerySchema = paginationQuerySchema.extend({
+  sessionId: sessionIdSchema.optional(),
+  status: taskStatusSchema.optional(),
+});
+
+export type TaskListQuery = z.infer<typeof taskListQuerySchema>;
+
+export const approvalListQuerySchema = paginationQuerySchema.extend({
+  decision: approvalDecisionSchema.optional(),
+  taskId: taskIdSchema.optional(),
+});
+
+export type ApprovalListQuery = z.infer<typeof approvalListQuerySchema>;
 
 export const createProfileRequestSchema = z.strictObject({
   name: profileNameSchema,
@@ -94,6 +115,15 @@ export const taskResponseSchema = z.strictObject({
 
 export type TaskResponse = z.infer<typeof taskResponseSchema>;
 
+export const taskListResponseSchema = z.strictObject({
+  data: z.array(taskSchema),
+  total: z.int().min(0),
+  page: z.int().min(1),
+  page_size: z.int().min(1).max(100),
+});
+
+export type TaskListResponse = z.infer<typeof taskListResponseSchema>;
+
 export const approvalResponseSchema = z.strictObject({
   data: z.strictObject({
     task: taskSchema,
@@ -102,3 +132,12 @@ export const approvalResponseSchema = z.strictObject({
 });
 
 export type ApprovalResponse = z.infer<typeof approvalResponseSchema>;
+
+export const approvalListResponseSchema = z.strictObject({
+  data: z.array(approvalSchema),
+  total: z.int().min(0),
+  page: z.int().min(1),
+  page_size: z.int().min(1).max(100),
+});
+
+export type ApprovalListResponse = z.infer<typeof approvalListResponseSchema>;
