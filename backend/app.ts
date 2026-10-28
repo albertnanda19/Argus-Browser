@@ -29,6 +29,17 @@ import {
   type PaginationQuery,
 } from "../shared/api";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
+import {
+  conversationListResponseSchema,
+  conversationResponseSchema,
+  createConversationRequestSchema,
+  messageListResponseSchema,
+  sendConversationMessageRequestSchema,
+  sendConversationMessageResponseSchema,
+  type Conversation,
+  type CreateConversationRequest,
+  type Message,
+} from "../shared/conversation";
 import { healthResponseSchema } from "../shared/contracts";
 import { createOpenApiDocument } from "../shared/openapi";
 import { profileIdSchema, type Profile } from "../shared/profile";
@@ -40,7 +51,7 @@ import {
   type ProviderConfigRequest,
 } from "../shared/provider";
 import { sessionIdSchema, type Session } from "../shared/session";
-import { taskIdSchema } from "../shared/task";
+import { conversationIdSchema, taskIdSchema, type TaskEntity } from "../shared/task";
 import type { ChromeLocalValidation } from "./chrome-local-binary";
 import { ChromeFailure } from "./chrome-errors";
 import { isAuthorized } from "./auth";
@@ -104,6 +115,23 @@ export type AgentStepService = {
   listByTask(taskId: string): readonly AgentStep[];
 };
 
+export type ConversationServiceApi = {
+  list(profileId: string): Promise<Conversation[]>;
+  create(profileId: string, input: CreateConversationRequest): Promise<Conversation>;
+  listMessages(profileId: string, conversationId: string): Promise<Message[]>;
+  sendMessage(
+    profileId: string,
+    conversationId: string,
+    text: string,
+    idempotencyKey: string,
+  ): Promise<{
+    readonly conversation: Conversation;
+    readonly message: Message;
+    readonly task: TaskEntity;
+  }>;
+  invalidateProfile(profileId: string): void;
+};
+
 export type AppOptions = {
   readonly token: string;
   readonly allowedOrigin: string;
@@ -118,6 +146,7 @@ export type AppOptions = {
   readonly events: EventBus;
   readonly eventConnections: EventStreamRegistry;
   readonly providers: ProviderConfigService;
+  readonly conversations?: ConversationServiceApi;
   readonly eventHeartbeatMs?: number;
 };
 
@@ -338,6 +367,7 @@ export function createApp(options: AppOptions): Hono {
 
     try {
       const profile = await options.profiles.create(body.data.name);
+      options.conversations?.invalidateProfile(profile.id);
       return c.json(profileResponseSchema.parse({ data: profile }), 201);
     } catch (error) {
       return handleKnownError(c, error);
@@ -361,6 +391,7 @@ export function createApp(options: AppOptions): Hono {
         }
 
         await options.profiles.delete(parsedId.data);
+        options.conversations?.invalidateProfile(parsedId.data);
         return "deleted";
       });
 
@@ -408,6 +439,151 @@ export function createApp(options: AppOptions): Hono {
       return handleKnownError(c, error);
     }
   });
+
+  app.get("/v1/profiles/:id/conversations", async (c) => {
+    const parsedId = profileIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id profil tidak valid.");
+    }
+
+    const pagination = parsePagination(c);
+    if (pagination === null) {
+      return problemResponse(c, 400, "Parameter pagination tidak valid.");
+    }
+
+    const conversations = options.conversations;
+    if (conversations === undefined) {
+      return problemResponse(c, 500, INTERNAL_ERROR_DETAIL);
+    }
+
+    try {
+      const items = await conversations.list(parsedId.data);
+      return c.json(
+        conversationListResponseSchema.parse(
+          paginate(items, pagination.page, pagination.page_size),
+        ),
+        200,
+      );
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
+  });
+
+  app.post("/v1/profiles/:id/conversations", async (c) => {
+    const parsedId = profileIdSchema.safeParse(c.req.param("id"));
+    if (!parsedId.success) {
+      return problemResponse(c, 400, "Id profil tidak valid.");
+    }
+
+    const body = await parseJsonBody(c, createConversationRequestSchema);
+    if (!body.ok) {
+      return problemResponse(c, 400, "Body permintaan tidak valid.");
+    }
+
+    const conversations = options.conversations;
+    if (conversations === undefined) {
+      return problemResponse(c, 500, INTERNAL_ERROR_DETAIL);
+    }
+
+    try {
+      const conversation = await conversations.create(parsedId.data, body.data);
+      return c.json(
+        conversationResponseSchema.parse({ data: conversation }),
+        201,
+      );
+    } catch (error) {
+      return handleKnownError(c, error);
+    }
+  });
+
+  app.get(
+    "/v1/profiles/:id/conversations/:conversationId/messages",
+    async (c) => {
+      const parsedId = profileIdSchema.safeParse(c.req.param("id"));
+      if (!parsedId.success) {
+        return problemResponse(c, 400, "Id profil tidak valid.");
+      }
+
+      const parsedConversationId = conversationIdSchema.safeParse(
+        c.req.param("conversationId"),
+      );
+      if (!parsedConversationId.success) {
+        return problemResponse(c, 400, "Id percakapan tidak valid.");
+      }
+
+      const pagination = parsePagination(c);
+      if (pagination === null) {
+        return problemResponse(c, 400, "Parameter pagination tidak valid.");
+      }
+
+      const conversations = options.conversations;
+      if (conversations === undefined) {
+        return problemResponse(c, 500, INTERNAL_ERROR_DETAIL);
+      }
+
+      try {
+        const messages = await conversations.listMessages(
+          parsedId.data,
+          parsedConversationId.data,
+        );
+        return c.json(
+          messageListResponseSchema.parse(
+            paginate(messages, pagination.page, pagination.page_size),
+          ),
+          200,
+        );
+      } catch (error) {
+        return handleKnownError(c, error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/profiles/:id/conversations/:conversationId/messages",
+    async (c) => {
+      const parsedId = profileIdSchema.safeParse(c.req.param("id"));
+      if (!parsedId.success) {
+        return problemResponse(c, 400, "Id profil tidak valid.");
+      }
+
+      const parsedConversationId = conversationIdSchema.safeParse(
+        c.req.param("conversationId"),
+      );
+      if (!parsedConversationId.success) {
+        return problemResponse(c, 400, "Id percakapan tidak valid.");
+      }
+
+      const body = await parseJsonBody(c, sendConversationMessageRequestSchema);
+      if (!body.ok) {
+        return problemResponse(c, 400, "Body permintaan tidak valid.");
+      }
+
+      const idempotencyKey = parseIdempotencyKey(c);
+      if (!idempotencyKey.ok) {
+        return problemResponse(c, 400, idempotencyKey.detail);
+      }
+
+      const conversations = options.conversations;
+      if (conversations === undefined) {
+        return problemResponse(c, 500, INTERNAL_ERROR_DETAIL);
+      }
+
+      try {
+        const result = await conversations.sendMessage(
+          parsedId.data,
+          parsedConversationId.data,
+          body.data.text,
+          idempotencyKey.key,
+        );
+        return c.json(
+          sendConversationMessageResponseSchema.parse({ data: result }),
+          202,
+        );
+      } catch (error) {
+        return handleKnownError(c, error);
+      }
+    },
+  );
 
   app.post("/v1/sessions", async (c) => {
     const body = await parseJsonBody(c, createSessionRequestSchema);

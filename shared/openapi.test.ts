@@ -11,6 +11,10 @@ import {
   agentStepVerificationSchema,
 } from "./agent-step";
 import { chromeInstallerStateSchema } from "./chrome-installer";
+import {
+  conversationSchema,
+  messageSchema,
+} from "./conversation";
 import { problemSchema } from "./contracts";
 import { createOpenApiDocument, type OpenApiOperation } from "./openapi";
 import { profileSchema } from "./profile";
@@ -37,6 +41,10 @@ const EXPECTED_OPERATIONS = [
   "DELETE /profiles/{id}",
   "GET /profiles/{id}/policy",
   "PUT /profiles/{id}/policy",
+  "GET /profiles/{id}/conversations",
+  "POST /profiles/{id}/conversations",
+  "GET /profiles/{id}/conversations/{conversationId}/messages",
+  "POST /profiles/{id}/conversations/{conversationId}/messages",
   "GET /sessions",
   "POST /sessions",
   "GET /sessions/{id}",
@@ -180,6 +188,7 @@ describe("OpenAPI document", () => {
       "Browser",
       "Providers",
       "Profiles",
+      "Conversations",
       "Sessions",
       "Tasks",
       "Approvals",
@@ -192,8 +201,8 @@ describe("OpenAPI document", () => {
     const document = createOpenApiDocument();
     const operations = allOperations().map(({ method, path }) => `${method.toUpperCase()} ${path}`);
 
-    expect(Object.keys(document.paths)).toHaveLength(22);
-    expect(operations).toHaveLength(28);
+    expect(Object.keys(document.paths)).toHaveLength(24);
+    expect(operations).toHaveLength(32);
     expect(new Set(operations)).toEqual(new Set(EXPECTED_OPERATIONS));
   });
 
@@ -299,7 +308,28 @@ describe("OpenAPI document", () => {
     expect(schemas.AgentStepListResponse).toEqual(
       agentComponents.AgentStepListResponse,
     );
-    expect(Object.keys(schemas)).toHaveLength(37);
+    expect(schemas.Conversation).toEqual(generatedJsonSchema(conversationSchema, "output"));
+    expect(schemas.Message).toEqual(generatedJsonSchema(messageSchema, "output"));
+    expect(schemas.ConversationListResponse).toMatchObject({
+      type: "object",
+      required: ["data", "total", "page", "page_size"],
+    });
+    expect(collectRefs(schemas.ConversationListResponse)).toEqual([
+      "#/components/schemas/Conversation",
+    ]);
+    expect(schemas.MessageListResponse).toMatchObject({
+      type: "object",
+      required: ["data", "total", "page", "page_size"],
+    });
+    expect(collectRefs(schemas.MessageListResponse)).toEqual([
+      "#/components/schemas/Message",
+    ]);
+    expect(collectRefs(schemas.SendMessageResponse)).toEqual([
+      "#/components/schemas/Conversation",
+      "#/components/schemas/Message",
+      "#/components/schemas/Task",
+    ]);
+    expect(Object.keys(schemas)).toHaveLength(45);
   });
 
   it("documents profile policy reads and writes", () => {
@@ -347,6 +377,60 @@ describe("OpenAPI document", () => {
     expect(operation.responses["400"]).toBeDefined();
     expect(operation.responses["422"]).toBeDefined();
     expect(operation.responses["500"]).toBeDefined();
+  });
+
+  it("documents conversation endpoints and their components", () => {
+    const schemas = createOpenApiDocument().components.schemas;
+    const list = operationAt("get", "/profiles/{id}/conversations");
+    const create = operationAt("post", "/profiles/{id}/conversations");
+    const messages = operationAt(
+      "get",
+      "/profiles/{id}/conversations/{conversationId}/messages",
+    );
+    const send = operationAt(
+      "post",
+      "/profiles/{id}/conversations/{conversationId}/messages",
+    );
+
+    expect(list.tags).toEqual(["Conversations"]);
+    expect(list.responses["200"]).toEqual({
+      description: "Daftar percakapan profil.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/ConversationListResponse" },
+        },
+      },
+    });
+    expect(create.responses["201"]).toEqual({
+      description: "Percakapan dibuat.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/ConversationResponse" },
+        },
+      },
+    });
+    expect(messages.responses["200"]).toEqual({
+      description: "Daftar pesan percakapan.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/MessageListResponse" },
+        },
+      },
+    });
+    expect(send.responses["202"]).toEqual({
+      description: "Pesan diterima dan task dibuat.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/SendMessageResponse" },
+        },
+      },
+    });
+    expect(send.responses["409"]).toBeDefined();
+    expect(send.responses["500"]).toBeDefined();
+    expect(send.parameters?.map((parameter) => parameter.name)).toContain(
+      "Idempotency-Key",
+    );
+    expect(requiredOf(schemas.Task)).toContain("conversationId");
   });
 
   it("keeps optional request fields optional", () => {

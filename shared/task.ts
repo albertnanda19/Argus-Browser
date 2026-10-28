@@ -3,6 +3,8 @@ import { sessionIdSchema } from "./session";
 
 export const taskIdSchema = z.string().regex(/^t_[0-9a-f]{16}$/);
 
+export const conversationIdSchema = z.string().regex(/^cv_[0-9a-f]{16}$/);
+
 export const taskKindSchema = z.enum(["agent", "research"]);
 
 export type TaskKind = z.infer<typeof taskKindSchema>;
@@ -36,6 +38,7 @@ export const taskSchema = z.strictObject({
   kind: taskKindSchema.default("agent"),
   research: researchTargetSchema.nullable().default(null),
   outputSchema: jsonObjectSchema.nullable(),
+  conversationId: conversationIdSchema.nullable().default(null),
   status: taskStatusSchema,
   createdAt: z.iso.datetime({ offset: false }),
   completedAt: z.iso.datetime({ offset: false }).nullable(),
@@ -43,7 +46,9 @@ export const taskSchema = z.strictObject({
 
 export type TaskEntity = z.infer<typeof taskSchema>;
 
-export type Task = Omit<TaskEntity, "kind" | "research">;
+export type Task = Omit<TaskEntity, "kind" | "research" | "conversationId"> & {
+  conversationId?: string | null;
+};
 
 export const approvalIdSchema = z.string().regex(/^a_[0-9a-f]{16}$/);
 

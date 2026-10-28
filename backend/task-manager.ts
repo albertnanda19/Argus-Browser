@@ -53,7 +53,12 @@ export type ApprovalResult = {
 };
 
 export type TaskService = {
-  createTask(sessionId: string, input: CreateTaskRequest, idempotencyKey: string): TaskEntity;
+  createTask(
+    sessionId: string,
+    input: CreateTaskRequest,
+    idempotencyKey: string,
+    conversationId?: string | null,
+  ): TaskEntity;
   getTask(taskId: string): TaskEntity | null;
   listBySession(sessionId: string): TaskEntity[];
   listTasks(): TaskEntity[];
@@ -139,7 +144,12 @@ class TaskManagerImpl implements TaskService {
     this.now = options.now ?? (() => new Date());
   }
 
-  createTask(sessionId: string, input: CreateTaskRequest, idempotencyKey: string): TaskEntity {
+  createTask(
+    sessionId: string,
+    input: CreateTaskRequest,
+    idempotencyKey: string,
+    conversationId: string | null = null,
+  ): TaskEntity {
     const session = this.sessions.get(sessionId);
     if (session === null) {
       throw new TaskError("task_session_not_found");
@@ -173,6 +183,7 @@ class TaskManagerImpl implements TaskService {
       kind: input.kind ?? "agent",
       research: researchOf(input),
       outputSchema: input.outputSchema ?? null,
+      conversationId,
       status: "queued",
       createdAt: createdAt.toISOString(),
       completedAt: null,

@@ -18,6 +18,14 @@ import {
   createArgusClient,
   type ArgusEvent,
 } from "./client";
+import type {
+  Conversation,
+  ConversationListResponse,
+  ConversationResponse,
+  Message,
+  MessageListResponse,
+  SendConversationMessageResponse,
+} from "./conversation";
 import type { HealthResponse, Problem } from "./contracts";
 import type { ProviderConfig, ProviderConfigRequest } from "./provider";
 import type { Approval, TaskEntity } from "./task";
@@ -32,7 +40,10 @@ const profileId = "p_0000000000000001";
 const sessionId = "s_0000000000000001";
 const taskId = "t_0000000000000001";
 const approvalId = "a_0000000000000001";
+const conversationId = "cv_0000000000000001";
+const conversationMessageId = "m_0000000000000001";
 const idempotencyKey = "task-key-001";
+const conversationIdempotencyKey = "conversation-key-001";
 
 const health: HealthResponse = {
   data: {
@@ -92,12 +103,54 @@ const task: TaskEntity = {
   kind: "agent",
   research: null,
   outputSchema: { email: "string" },
+  conversationId: null,
   status: "queued",
   createdAt: timestamp,
   completedAt: null,
 };
 
 const waitingTask: TaskEntity = { ...task, status: "waiting_approval" };
+
+const conversation: Conversation = {
+  id: conversationId,
+  profileId,
+  title: "Cari kontak",
+  createdAt: timestamp,
+  updatedAt: timestamp,
+};
+
+const conversationResponse: ConversationResponse = { data: conversation };
+
+const conversationList: ConversationListResponse = {
+  data: [conversation],
+  total: 1,
+  page: 1,
+  page_size: 20,
+};
+
+const conversationMessage: Message = {
+  id: conversationMessageId,
+  conversationId,
+  role: "operator",
+  text: "Cari kontak",
+  taskId,
+  createdAt: timestamp,
+};
+
+const messageList: MessageListResponse = {
+  data: [conversationMessage],
+  total: 1,
+  page: 1,
+  page_size: 20,
+};
+
+const sendMessageResponse: SendConversationMessageResponse = {
+  data: {
+    conversation,
+    message: conversationMessage,
+    task: { ...task, conversationId },
+  },
+};
 
 const cancelledTask: TaskEntity = { ...task, status: "cancelled", completedAt: timestamp };
 
@@ -293,6 +346,24 @@ function routeResponse(method: string, pathname: string): Response {
   if (key === `PUT /v1/profiles/${profileId}/policy`) {
     return jsonResponse({ data: profilePolicy });
   }
+  if (key === `GET /v1/profiles/${profileId}/conversations`) {
+    return jsonResponse(conversationList);
+  }
+  if (key === `POST /v1/profiles/${profileId}/conversations`) {
+    return jsonResponse(conversationResponse, 201);
+  }
+  if (
+    key ===
+    `GET /v1/profiles/${profileId}/conversations/${conversationId}/messages`
+  ) {
+    return jsonResponse(messageList);
+  }
+  if (
+    key ===
+    `POST /v1/profiles/${profileId}/conversations/${conversationId}/messages`
+  ) {
+    return jsonResponse(sendMessageResponse, 202);
+  }
   if (key === "GET /v1/sessions") return jsonResponse(sessionList);
   if (key === "POST /v1/sessions") return jsonResponse(sessionResponse, 201);
   if (key === `GET /v1/sessions/${sessionId}`) return jsonResponse(sessionResponse);
@@ -435,6 +506,24 @@ describe("createArgusClient", () => {
     await client.profiles.delete(profileId);
     const policyResult = await client.profiles.getPolicy(profileId);
     const savedPolicy = await client.profiles.setPolicy(profileId, profilePolicy);
+    const conversationResult = await client.conversations.list(profileId, {
+      page: 2,
+      page_size: 5,
+    });
+    const createdConversation = await client.conversations.create(profileId, {
+      title: "Cari kontak",
+    });
+    const messageResult = await client.conversations.listMessages(
+      profileId,
+      conversationId,
+      { page: 2, page_size: 5 },
+    );
+    const sentMessage = await client.conversations.sendMessage(
+      profileId,
+      conversationId,
+      { text: "Cari kontak" },
+      { idempotencyKey: conversationIdempotencyKey },
+    );
     await client.sessions.list();
     await client.sessions.start({ profileId });
     await client.sessions.get(sessionId);
@@ -475,6 +564,10 @@ describe("createArgusClient", () => {
       ["DELETE", `/v1/profiles/${profileId}`],
       ["GET", `/v1/profiles/${profileId}/policy`],
       ["PUT", `/v1/profiles/${profileId}/policy`],
+      ["GET", `/v1/profiles/${profileId}/conversations`],
+      ["POST", `/v1/profiles/${profileId}/conversations`],
+      ["GET", `/v1/profiles/${profileId}/conversations/${conversationId}/messages`],
+      ["POST", `/v1/profiles/${profileId}/conversations/${conversationId}/messages`],
       ["GET", "/v1/sessions"],
       ["POST", "/v1/sessions"],
       ["GET", `/v1/sessions/${sessionId}`],
@@ -518,6 +611,12 @@ describe("createArgusClient", () => {
 
       if (url.pathname === `/v1/sessions/${sessionId}/tasks`) {
         expect(headers.get("Idempotency-Key")).toBe(idempotencyKey);
+      } else if (
+        call.init?.method === "POST" &&
+        url.pathname ===
+          `/v1/profiles/${profileId}/conversations/${conversationId}/messages`
+      ) {
+        expect(headers.get("Idempotency-Key")).toBe(conversationIdempotencyKey);
       } else {
         expect(headers.get("Idempotency-Key")).toBeNull();
       }
@@ -533,6 +632,10 @@ describe("createArgusClient", () => {
     expect(browserResult).toEqual(browserState);
     expect(policyResult).toEqual({ data: profilePolicy });
     expect(savedPolicy).toEqual({ data: profilePolicy });
+    expect(conversationResult).toEqual(conversationList);
+    expect(createdConversation).toEqual(conversationResponse);
+    expect(messageResult).toEqual(messageList);
+    expect(sentMessage).toEqual(sendMessageResponse);
     expect(providerResult).toEqual(providerConfig);
     expect(savedProvider).toEqual(providerConfig);
     expect(new Uint8Array(await thumbnail.arrayBuffer())).toEqual(thumbnailBytes);
@@ -552,10 +655,17 @@ describe("createArgusClient", () => {
       "list",
       "setPolicy",
     ]);
+    expect(Object.keys(client.conversations).sort()).toEqual([
+      "create",
+      "list",
+      "listMessages",
+      "sendMessage",
+    ]);
     expect(Object.keys(client).sort()).toEqual([
       "actions",
       "approvals",
       "browser",
+      "conversations",
       "events",
       "health",
       "profiles",
@@ -875,13 +985,14 @@ describe("createArgusClient", () => {
     ]);
   });
 
-  it("exposes 27 documented methods", () => {
+  it("exposes 31 documented methods", () => {
     const stub = createFetchStub(() => jsonResponse(taskResponse));
     const client = createClient(stub.fetch);
     const methods = [
       client.health,
       ...Object.values(client.browser),
       ...Object.values(client.profiles),
+      ...Object.values(client.conversations),
       ...Object.values(client.sessions),
       ...Object.values(client.tasks),
       ...Object.values(client.approvals),
@@ -890,7 +1001,49 @@ describe("createArgusClient", () => {
       ...Object.values(client.events),
     ];
 
-    expect(methods.filter((value) => typeof value === "function")).toHaveLength(27);
+    expect(methods.filter((value) => typeof value === "function")).toHaveLength(31);
+  });
+
+  it("rejects an invalid conversation response", async () => {
+    const stub = createFetchStub(() =>
+      jsonResponse({ data: { ...conversation, title: 42 } }),
+    );
+    const client = createClient(stub.fetch);
+    const error = await captureError(() => client.conversations.list(profileId));
+
+    expect(error).toBeInstanceOf(ArgusApiError);
+    if (!(error instanceof ArgusApiError)) {
+      throw new Error("Expected ArgusApiError.");
+    }
+    expect(error.status).toBe(200);
+    expect(error.message).toBe("Respons Argus tidak valid.");
+  });
+
+  it("maps conversation problem responses to ArgusApiError", async () => {
+    const problem: Problem = {
+      type: "about:blank",
+      title: "Conflict",
+      status: 409,
+      detail: "Percakapan sudah mencapai batas 2.000 pesan. Buat percakapan baru.",
+    };
+    const stub = createFetchStub(() => jsonResponse(problem, 409));
+    const client = createClient(stub.fetch);
+    const error = await captureError(() =>
+      client.conversations.sendMessage(
+        profileId,
+        conversationId,
+        { text: "Halo" },
+        { idempotencyKey: conversationIdempotencyKey },
+      ),
+    );
+
+    expect(error).toBeInstanceOf(ArgusApiError);
+    if (!(error instanceof ArgusApiError)) {
+      throw new Error("Expected ArgusApiError.");
+    }
+    expect(error.status).toBe(409);
+    expect(error.message).toBe(problem.detail);
+    expect(error.problem).toEqual(problem);
   });
 
   it("does not read a body for 204 responses", async () => {

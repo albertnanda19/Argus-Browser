@@ -12,11 +12,14 @@ import {
 import { resolveAppDataDir, writeApiCredentials } from "./app-data";
 import { createChromeInstaller } from "./chrome-installer";
 import { ChromeFailure } from "./chrome-errors";
+import { createConversationService } from "./conversation-service";
+import { createConversationStore } from "./conversation-store";
 import { createEventBus } from "./event-bus";
 import { createEventStreamRegistry } from "./event-stream";
 import {
   createProfile,
   deleteProfile,
+  getProfile,
   getProfilePolicy,
   listProfiles,
   setProfilePolicy,
@@ -76,6 +79,7 @@ async function main(): Promise<void> {
     get: (profileId) => getProfilePolicy(appDataDir, profileId),
     set: (profileId, policy) => setProfilePolicy(appDataDir, profileId, policy),
   };
+  const conversationStore = createConversationStore({ appDataDir });
   const runner = createTaskRunner({
     sessions: sessionManager,
     tasks,
@@ -86,6 +90,22 @@ async function main(): Promise<void> {
     profilePolicies,
     appDataDir,
     approvalTimeoutMs: readApprovalTimeoutMs(),
+    conversationContext: {
+      listRecentOperatorMessages: (conversationId, excludeTaskId, limit) =>
+        conversationStore.listRecentOperatorMessages(
+          conversationId,
+          excludeTaskId,
+          limit,
+        ),
+    },
+  });
+  const conversations = createConversationService({
+    store: conversationStore,
+    profiles: { get: (profileId) => getProfile(appDataDir, profileId) },
+    sessions: sessionManager,
+    tasks,
+    runner,
+    events,
   });
 
   const sessions: SessionService = sessionManager;
@@ -105,6 +125,7 @@ async function main(): Promise<void> {
       events,
       eventConnections,
       providers,
+      conversations,
     }).fetch,
     hostname: "127.0.0.1",
     port: 0,
@@ -132,6 +153,7 @@ async function main(): Promise<void> {
     eventConnections.shutdown();
 
     const stop = async (): Promise<void> => {
+      conversations.shutdown();
       await runner.shutdown().catch((error: unknown) => {
         console.warn(
           `Task runner shutdown failed: ${error instanceof Error ? error.name : "unknown"}`,

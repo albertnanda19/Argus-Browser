@@ -40,6 +40,18 @@ import {
 } from "./api";
 import type { ChromeInstallerState } from "./chrome-installer";
 import {
+  conversationListResponseSchema,
+  conversationResponseSchema,
+  messageListResponseSchema,
+  sendConversationMessageResponseSchema,
+  type ConversationListResponse,
+  type ConversationResponse,
+  type CreateConversationRequest,
+  type MessageListResponse,
+  type SendConversationMessageRequest,
+  type SendConversationMessageResponse,
+} from "./conversation";
+import {
   healthResponseSchema,
   problemSchema,
   type ApiInfo,
@@ -94,6 +106,10 @@ export type CreateTaskOptions = {
   readonly idempotencyKey: string;
 };
 
+export type SendConversationMessageOptions = {
+  readonly idempotencyKey: string;
+};
+
 export type StreamEventsOptions = {
   readonly taskId?: string;
   readonly lastEventId?: string;
@@ -123,6 +139,27 @@ export type ArgusClient = {
     delete(id: string): Promise<void>;
     getPolicy(id: string): Promise<ProfilePolicyResponse>;
     setPolicy(id: string, policy: ProfilePolicy): Promise<ProfilePolicyResponse>;
+  };
+  readonly conversations: {
+    list(
+      profileId: string,
+      query?: Partial<PaginationQuery>,
+    ): Promise<ConversationListResponse>;
+    create(
+      profileId: string,
+      input?: CreateConversationRequest,
+    ): Promise<ConversationResponse>;
+    listMessages(
+      profileId: string,
+      conversationId: string,
+      query?: Partial<PaginationQuery>,
+    ): Promise<MessageListResponse>;
+    sendMessage(
+      profileId: string,
+      conversationId: string,
+      input: SendConversationMessageRequest,
+      options: SendConversationMessageOptions,
+    ): Promise<SendConversationMessageResponse>;
   };
   readonly sessions: {
     list(query?: Partial<PaginationQuery>): Promise<SessionListResponse>;
@@ -544,6 +581,40 @@ export function createArgusClient(options: ArgusClientOptions): ArgusClient {
           profilePolicyResponseSchema,
           `/profiles/${encodeURIComponent(id)}/policy`,
           { method: "PUT", body: policy },
+        ),
+    },
+    conversations: {
+      list: (profileId, query) =>
+        request(
+          config,
+          conversationListResponseSchema,
+          `/profiles/${encodeURIComponent(profileId)}/conversations${paginationQuery(query)}`,
+          { method: "GET" },
+        ),
+      create: (profileId, input = {}) =>
+        request(
+          config,
+          conversationResponseSchema,
+          `/profiles/${encodeURIComponent(profileId)}/conversations`,
+          { method: "POST", body: input },
+        ),
+      listMessages: (profileId, conversationId, query) =>
+        request(
+          config,
+          messageListResponseSchema,
+          `/profiles/${encodeURIComponent(profileId)}/conversations/${encodeURIComponent(conversationId)}/messages${paginationQuery(query)}`,
+          { method: "GET" },
+        ),
+      sendMessage: (profileId, conversationId, input, sendOptions) =>
+        request(
+          config,
+          sendConversationMessageResponseSchema,
+          `/profiles/${encodeURIComponent(profileId)}/conversations/${encodeURIComponent(conversationId)}/messages`,
+          {
+            method: "POST",
+            body: input,
+            headers: { "Idempotency-Key": sendOptions.idempotencyKey },
+          },
         ),
     },
     sessions: {

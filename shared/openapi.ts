@@ -27,6 +27,16 @@ import {
 } from "./agent-step";
 import { actionRequestSchema, actionResponseSchema, actionResultSchema } from "./action";
 import { chromeInstallerStateSchema } from "./chrome-installer";
+import {
+  conversationListResponseSchema,
+  conversationResponseSchema,
+  conversationSchema,
+  createConversationRequestSchema,
+  messageListResponseSchema,
+  messageSchema,
+  sendConversationMessageRequestSchema,
+  sendConversationMessageResponseSchema,
+} from "./conversation";
 import { healthResponseSchema, problemSchema } from "./contracts";
 import { profileIdSchema, profileSchema } from "./profile";
 import { profilePolicySchema } from "./profile-policy";
@@ -44,6 +54,7 @@ import { sessionIdSchema, sessionSchema } from "./session";
 import {
   approvalDecisionSchema,
   approvalSchema,
+  conversationIdSchema,
   taskIdSchema,
   taskSchema,
   taskStatusSchema,
@@ -113,6 +124,14 @@ const COMPONENTS: readonly ComponentDefinition[] = [
   { name: "ProfilePolicyResponse", schema: profilePolicyResponseSchema, io: "output" },
   { name: "ProfileListResponse", schema: profileListResponseSchema, io: "output" },
   { name: "CreateProfileRequest", schema: createProfileRequestSchema, io: "input" },
+  { name: "Conversation", schema: conversationSchema, io: "output" },
+  { name: "ConversationResponse", schema: conversationResponseSchema, io: "output" },
+  { name: "ConversationListResponse", schema: conversationListResponseSchema, io: "output" },
+  { name: "CreateConversationRequest", schema: createConversationRequestSchema, io: "input" },
+  { name: "Message", schema: messageSchema, io: "output" },
+  { name: "MessageListResponse", schema: messageListResponseSchema, io: "output" },
+  { name: "SendMessageRequest", schema: sendConversationMessageRequestSchema, io: "input" },
+  { name: "SendMessageResponse", schema: sendConversationMessageResponseSchema, io: "output" },
   { name: "Session", schema: sessionSchema, io: "output" },
   { name: "SessionResponse", schema: sessionResponseSchema, io: "output" },
   { name: "SessionListResponse", schema: sessionListResponseSchema, io: "output" },
@@ -148,6 +167,7 @@ const TAGS = [
   "Browser",
   "Providers",
   "Profiles",
+  "Conversations",
   "Sessions",
   "Tasks",
   "Approvals",
@@ -250,6 +270,11 @@ const PAGE_SIZE_PARAMETER: OpenApiParameter = {
 const PAGINATION_PARAMETERS = [PAGE_PARAMETER, PAGE_SIZE_PARAMETER] as const;
 
 const PROFILE_ID_PARAMETER = pathParameter("id", profileIdSchema, "Id profil.");
+const CONVERSATION_ID_PARAMETER = pathParameter(
+  "conversationId",
+  conversationIdSchema,
+  "Id percakapan.",
+);
 const SESSION_ID_PARAMETER = pathParameter("id", sessionIdSchema, "Id sesi.");
 const TASK_ID_PARAMETER = pathParameter("id", taskIdSchema, "Id task.");
 
@@ -461,6 +486,71 @@ const PATHS: Record<string, Record<string, OpenApiOperation>> = {
         "401": UNAUTHORIZED,
         "404": NOT_FOUND,
         "422": UNPROCESSABLE,
+      },
+    },
+  },
+  "/profiles/{id}/conversations": {
+    get: {
+      operationId: "listProfileConversations",
+      summary: "Daftar percakapan profil dengan paginasi",
+      tags: ["Conversations"],
+      parameters: [PROFILE_ID_PARAMETER, ...PAGINATION_PARAMETERS],
+      responses: {
+        "200": jsonResponse("Daftar percakapan profil.", "ConversationListResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
+      },
+    },
+    post: {
+      operationId: "createProfileConversation",
+      summary: "Buat percakapan baru untuk profil",
+      tags: ["Conversations"],
+      parameters: [PROFILE_ID_PARAMETER],
+      requestBody: requestBody("CreateConversationRequest"),
+      responses: {
+        "201": jsonResponse("Percakapan dibuat.", "ConversationResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
+        "500": INTERNAL_ERROR,
+      },
+    },
+  },
+  "/profiles/{id}/conversations/{conversationId}/messages": {
+    get: {
+      operationId: "listConversationMessages",
+      summary: "Daftar pesan percakapan dengan paginasi",
+      tags: ["Conversations"],
+      parameters: [
+        PROFILE_ID_PARAMETER,
+        CONVERSATION_ID_PARAMETER,
+        ...PAGINATION_PARAMETERS,
+      ],
+      responses: {
+        "200": jsonResponse("Daftar pesan percakapan.", "MessageListResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
+      },
+    },
+    post: {
+      operationId: "sendConversationMessage",
+      summary: "Kirim pesan operator dan mulai task",
+      tags: ["Conversations"],
+      parameters: [
+        PROFILE_ID_PARAMETER,
+        CONVERSATION_ID_PARAMETER,
+        IDEMPOTENCY_KEY_PARAMETER,
+      ],
+      requestBody: requestBody("SendMessageRequest"),
+      responses: {
+        "202": jsonResponse("Pesan diterima dan task dibuat.", "SendMessageResponse"),
+        "400": BAD_REQUEST,
+        "401": UNAUTHORIZED,
+        "404": NOT_FOUND,
+        "409": CONFLICT,
+        "500": INTERNAL_ERROR,
       },
     },
   },

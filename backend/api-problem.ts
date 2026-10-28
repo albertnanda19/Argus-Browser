@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { problemSchema, type Problem } from "../shared/contracts";
 import { ActionError } from "./action-errors";
+import { ConversationError } from "./conversation-errors";
 import { ProfileStoreError } from "./profile-store";
 import { ProviderError } from "./provider-errors";
 import { SessionError } from "./session-errors";
@@ -98,6 +99,20 @@ export function knownProblem(
       return { status: 400, detail: error.message };
     }
     return { status: 422, detail: error.message };
+  }
+
+  if (error instanceof ConversationError) {
+    switch (error.code) {
+      case "conversation_not_found":
+      case "conversation_profile_not_found":
+        return { status: 404, detail: error.message };
+      case "conversation_session_not_ready":
+      case "conversation_idempotency_conflict":
+      case "conversation_full":
+        return { status: 409, detail: error.message };
+      case "conversation_save_failed":
+        return { status: 500, detail: error.message };
+    }
   }
 
   return null;

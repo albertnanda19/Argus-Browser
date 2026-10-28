@@ -572,3 +572,56 @@ describe("idempotency", () => {
     expect(harness.tasks.listBySession(readySessionId)).toHaveLength(2);
   });
 });
+
+describe("task conversation binding", () => {
+  it("stores an internal conversationId and exposes it on reads", () => {
+    const harness = createHarness();
+
+    const task = harness.tasks.createTask(
+      readySessionId,
+      { goal: "Lanjutkan percakapan" },
+      "key-conversation",
+      "cv_0000000000000001",
+    );
+
+    expect(task.conversationId).toBe("cv_0000000000000001");
+    expect(harness.tasks.getTask(task.id)?.conversationId).toBe(
+      "cv_0000000000000001",
+    );
+    expect(harness.tasks.listTasks()[0]?.conversationId).toBe(
+      "cv_0000000000000001",
+    );
+  });
+
+  it("defaults conversationId to null for tasks created by the session endpoint", () => {
+    const harness = createHarness();
+
+    const task = harness.tasks.createTask(
+      readySessionId,
+      { goal: "Task lama" },
+      "key-null",
+    );
+
+    expect(task.conversationId).toBeNull();
+    expect(harness.tasks.getTask(task.id)?.conversationId).toBeNull();
+  });
+
+  it("keeps the old idempotency fingerprint independent from conversationId", () => {
+    const harness = createHarness();
+
+    const first = harness.tasks.createTask(
+      readySessionId,
+      { goal: "Sama" },
+      "key-fingerprint",
+    );
+    const second = harness.tasks.createTask(
+      readySessionId,
+      { goal: "Sama" },
+      "key-fingerprint",
+      "cv_0000000000000001",
+    );
+
+    expect(second.id).toBe(first.id);
+    expect(second.conversationId).toBeNull();
+  });
+});

@@ -136,7 +136,7 @@ describe("GET /v1/openapi.json", () => {
     );
 
     expect(body.openapi).toBe("3.1.0");
-    expect(operationCount).toBe(28);
+    expect(operationCount).toBe(32);
   });
 
   it("builds the document once when the app is created", async () => {
