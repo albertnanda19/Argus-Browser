@@ -22,7 +22,6 @@ import {
   type InputExecutorOptions,
 } from "./input-executor";
 import {
-  isWithinWorkingHours,
   readingDurationMs,
   sampleActionDelay,
   type RandomSource,
@@ -60,7 +59,6 @@ const VERIFICATION_UNREADABLE_REASON = "Verifikasi tidak dapat dibaca.";
 const DEADLINE_REASON = "Batas waktu task terlampaui.";
 const INTERNAL_REASON = "Task gagal karena kesalahan internal.";
 const POLICY_UNREADABLE_REASON = "Policy profil tidak dapat dibaca.";
-const OUTSIDE_WORKING_HOURS_REASON = "Task di luar jam kerja profil.";
 const INPUT_TARGET_NOT_FOUND_REASON = "Target aksi tidak ditemukan.";
 const INPUT_TIMEOUT_REASON = "Aksi tidak selesai dalam batas waktu.";
 const INPUT_FAILED_REASON = "Aksi gagal dijalankan.";
@@ -910,11 +908,6 @@ class TaskRunnerImpl implements TaskRunner {
 
       const policy = await this.resolvePolicy(record, session.profileId);
       if (policy === null) {
-        return;
-      }
-
-      if (!isWithinWorkingHours(policy, this.now())) {
-        this.failTask(record, OUTSIDE_WORKING_HOURS_REASON);
         return;
       }
 

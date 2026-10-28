@@ -23,6 +23,11 @@ const profileMetadataSchema = z.strictObject({
   policy: profilePolicySchema.optional(),
 });
 
+const legacyProfileMetadataSchema = z.object({
+  ...profileSchema.shape,
+  policy: z.object(profilePolicySchema.shape).optional(),
+});
+
 type ProfileMetadata = z.infer<typeof profileMetadataSchema>;
 
 const MESSAGES = {
@@ -135,7 +140,7 @@ async function readProfileMetadata(
 
   let metadata: ProfileMetadata;
   try {
-    metadata = profileMetadataSchema.parse(JSON.parse(contents));
+    metadata = legacyProfileMetadataSchema.parse(JSON.parse(contents));
   } catch {
     throw corruptMetadataError();
   }

@@ -278,6 +278,13 @@ describe("OpenAPI document", () => {
       generatedJsonSchema(chromeInstallerStateSchema, "output"),
     );
     expect(schemas.ProfilePolicy).toEqual(generatedJsonSchema(profilePolicySchema, "output"));
+    expect(Object.keys(schemas.ProfilePolicy?.properties ?? {})).toEqual([
+      "actionDelay",
+      "typing",
+      "mouse",
+      "scroll",
+      "reading",
+    ]);
     expect(schemas.ProviderConfig).toEqual(generatedJsonSchema(providerConfigSchema, "output"));
     expect(schemas.UpdateProviderRequest).toEqual(
       generatedJsonSchema(providerConfigRequestSchema, "input"),

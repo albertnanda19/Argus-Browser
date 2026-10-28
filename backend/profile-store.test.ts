@@ -48,7 +48,6 @@ function customPolicy(): ProfilePolicy {
     mouse: { steps: 18, overshootRatio: 0.22, curvature: 0.31, stepDelayMs: 12 },
     scroll: { initialDeltaPx: 640, decay: 0.74, steps: 11, stepDelayMs: 25 },
     reading: { msPerCharacter: 42, minMs: 300, maxMs: 7200 },
-    workingHours: { days: [1, 2, 3, 4], start: "08:15", end: "17:45" },
   };
 }
 
@@ -256,11 +255,7 @@ describe("getProfilePolicy", () => {
     const policy = await getProfilePolicy(appDataDir, created.id);
 
     expect(policy).toEqual(createDefaultProfilePolicy());
-    expect(policy.workingHours).toEqual({
-      days: [1, 2, 3, 4, 5],
-      start: "09:00",
-      end: "18:00",
-    });
+    expect(Object.hasOwn(policy, "workingHours")).toBe(false);
     expect(policy.actionDelay.sigma).toBeGreaterThan(0);
     expect(policy.actionDelay.minMs).toBeLessThanOrEqual(policy.actionDelay.maxMs);
     expect(policy.typing.baseIntervalMs).not.toBe(policy.typing.burstIntervalMs);
@@ -285,6 +280,44 @@ describe("getProfilePolicy", () => {
     await expect(getProfilePolicy(appDataDir, legacy.id)).resolves.toEqual(
       createDefaultProfilePolicy(),
     );
+  });
+
+  it("ignores legacy working hours and drops them on the next policy write", async () => {
+    const appDataDir = newAppDataDir();
+    const legacy: Profile = {
+      id: "p_abababababababab",
+      name: "Lama",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: null,
+    };
+    const profileDir = resolveProfileDir(appDataDir, legacy.id);
+    await mkdir(profileDir, { recursive: true, mode: 0o700 });
+    const metadataFile = join(profileDir, "profile.json");
+    const policy = customPolicy();
+    const legacyPolicy = {
+      ...policy,
+      workingHours: { days: [1, 2, 3, 4, 5], start: "09:00", end: "18:00" },
+    };
+    await writeFile(
+      metadataFile,
+      JSON.stringify({ ...legacy, policy: legacyPolicy }),
+      { mode: 0o600 },
+    );
+
+    await expect(getProfile(appDataDir, legacy.id)).resolves.toEqual(legacy);
+    await expect(getProfilePolicy(appDataDir, legacy.id)).resolves.toEqual(policy);
+
+    const nextPolicy: ProfilePolicy = {
+      ...policy,
+      reading: { msPerCharacter: 20, minMs: 100, maxMs: 2_000 },
+    };
+    await setProfilePolicy(appDataDir, legacy.id, nextPolicy);
+    const stored = JSON.parse(await readFile(metadataFile, "utf8")) as {
+      policy?: Record<string, unknown>;
+    };
+
+    expect(stored.policy).toEqual(nextPolicy);
+    expect(Object.hasOwn(stored.policy ?? {}, "workingHours")).toBe(false);
   });
 
   it("rejects an unknown id with profile_not_found", async () => {
@@ -342,7 +375,7 @@ describe("setProfilePolicy", () => {
     const firstPolicy = customPolicy();
     const secondPolicy: ProfilePolicy = {
       ...createDefaultProfilePolicy(),
-      workingHours: { days: [6, 7], start: "10:00", end: "14:00" },
+      reading: { msPerCharacter: 50, minMs: 400, maxMs: 9_000 },
     };
 
     await setProfilePolicy(appDataDir, first.id, firstPolicy);

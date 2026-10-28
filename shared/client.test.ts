@@ -808,9 +808,7 @@ describe("createArgusClient", () => {
   it("rejects an invalid profile policy response", async () => {
     const stub = createFetchStub(() =>
       jsonResponse({
-        data: {
-          workingHours: { days: [1, 2, 3, 4, 5], start: "09:00", end: "18:00" },
-        },
+        data: { reading: { msPerCharacter: 20, minMs: 100, maxMs: 1_000 } },
       }),
     );
     const client = createClient(stub.fetch);

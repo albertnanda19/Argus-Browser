@@ -53,10 +53,6 @@ function quadraticPoint(
   };
 }
 
-function timeToMinutes(value: string): number {
-  return Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5));
-}
-
 export function sampleActionDelay(
   policy: ProfilePolicy,
   random: RandomSource = defaultRandomSource,
@@ -243,21 +239,4 @@ export function readingDurationMs(
   );
 
   return Math.round(clamped);
-}
-
-export function isWithinWorkingHours(
-  policy: ProfilePolicy,
-  at: Date,
-): boolean {
-  const day = at.getDay();
-  const isoDay = day === 0 ? 7 : day;
-  const minutes = at.getHours() * 60 + at.getMinutes();
-  const start = timeToMinutes(policy.workingHours.start);
-  const end = timeToMinutes(policy.workingHours.end);
-
-  return (
-    policy.workingHours.days.includes(isoDay) &&
-    minutes >= start &&
-    minutes < end
-  );
 }

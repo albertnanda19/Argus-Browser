@@ -268,11 +268,6 @@ const permissivePolicy: ProfilePolicy = {
   mouse: { steps: 1, overshootRatio: 0, curvature: 0, stepDelayMs: 0 },
   scroll: { initialDeltaPx: 1, decay: 0.5, steps: 1, stepDelayMs: 0 },
   reading: { msPerCharacter: 0, minMs: 0, maxMs: 0 },
-  workingHours: {
-    days: [1, 2, 3, 4, 5, 6, 7],
-    start: "00:00",
-    end: "23:59",
-  },
 };
 
 function createTestPolicy(overrides: Partial<ProfilePolicy> = {}): ProfilePolicy {
@@ -1499,29 +1494,10 @@ describe("task runner human-like integration", () => {
     method: "click",
   };
 
-  it("fails outside the profile working hours before creating the agent", async () => {
-    let isAgentCreated = false;
-    let isExecutorCreated = false;
+  it("runs at the weekend outside business hours", async () => {
     const harness = createRunnerHarness({
-      profilePolicies: {
-        get: async () =>
-          createTestPolicy({
-            workingHours: {
-              days: [1, 2, 3, 4, 5, 6, 7],
-              start: "09:00",
-              end: "10:00",
-            },
-          }),
-      },
-      now: () => new Date(2026, 9, 26, 12, 0, 0),
-      createAgent: async () => {
-        isAgentCreated = true;
-        return createFakeAgent().agent;
-      },
-      createInputExecutor: () => {
-        isExecutorCreated = true;
-        return createFakeInputExecutor().executor;
-      },
+      now: () => new Date(2026, 9, 31, 22, 30, 0),
+      createAgent: async () => createFakeAgent().agent,
     });
     const task = createTask(harness.tasks);
     const terminal = waitForTerminal(harness.events, task.id);
@@ -1529,23 +1505,11 @@ describe("task runner human-like integration", () => {
     harness.runner.start(task.id);
     const event = await withDeadline(terminal);
 
-    expect(event.type).toBe("task.failed");
-    if (event.type === "task.failed") {
-      expect(event.reason).toBe("Task di luar jam kerja profil.");
-    }
-    expect(isAgentCreated).toBe(false);
-    expect(isExecutorCreated).toBe(false);
-    expect(harness.steps.list(task.id)).toHaveLength(0);
+    expect(event.type).toBe("task.completed");
   });
 
-  it("runs inside working hours and reads the policy once for the session profile", async () => {
-    const policy = createTestPolicy({
-      workingHours: {
-        days: [1, 2, 3, 4, 5, 6, 7],
-        start: "09:00",
-        end: "18:00",
-      },
-    });
+  it("reads the policy once for the session profile", async () => {
+    const policy = createTestPolicy();
     const order: string[] = [];
     const policyCalls: string[] = [];
     const harness = createRunnerHarness({
@@ -2023,36 +1987,6 @@ describe("task runner human-like integration", () => {
     expect(verificationAt - afterSnapshotAt).toBeGreaterThanOrEqual(80);
   });
 
-  it("does not recheck working hours after the task starts", async () => {
-    let clock = new Date(2026, 9, 26, 17, 59, 0);
-    const fake = createFakeAgent({
-      observe: async () => {
-        clock = new Date(2026, 9, 26, 18, 1, 0);
-        return [clickAction];
-      },
-    });
-    const harness = createRunnerHarness({
-      profilePolicies: {
-        get: async () =>
-          createTestPolicy({
-            workingHours: {
-              days: [1, 2, 3, 4, 5, 6, 7],
-              start: "09:00",
-              end: "18:00",
-            },
-          }),
-      },
-      now: () => clock,
-      createAgent: async () => fake.agent,
-    });
-    const task = createTask(harness.tasks);
-    const terminal = waitForTerminal(harness.events, task.id);
-
-    harness.runner.start(task.id);
-    const event = await withDeadline(terminal);
-
-    expect(event.type).toBe("task.completed");
-  });
 });
 
 describe("task runner pre-navigation", () => {

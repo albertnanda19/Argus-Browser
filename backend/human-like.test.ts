@@ -4,7 +4,6 @@ import {
   type ProfilePolicy,
 } from "../shared/profile-policy";
 import {
-  isWithinWorkingHours,
   planMousePath,
   planScrollDeltas,
   planTypingDelays,
@@ -450,54 +449,5 @@ describe("readingDurationMs", () => {
     for (const length of [0, 1, 7, 99, 1000]) {
       expect(Number.isInteger(readingDurationMs(length, policy))).toBe(true);
     }
-  });
-});
-
-describe("isWithinWorkingHours", () => {
-  const policy = createDefaultProfilePolicy();
-  const mondayNine = new Date(2026, 9, 26, 9, 0, 0);
-  const mondayEightFiftyNine = new Date(2026, 9, 26, 8, 59, 0);
-  const mondaySeventeenFiftyNine = new Date(2026, 9, 26, 17, 59, 0);
-  const mondayEighteen = new Date(2026, 9, 26, 18, 0, 0);
-  const saturdayTen = new Date(2026, 9, 31, 10, 0, 0);
-
-  it("includes the start of the window", () => {
-    expect(isWithinWorkingHours(policy, mondayNine)).toBe(true);
-  });
-
-  it("excludes the minute before the window", () => {
-    expect(isWithinWorkingHours(policy, mondayEightFiftyNine)).toBe(false);
-  });
-
-  it("includes the last minute before the end", () => {
-    expect(isWithinWorkingHours(policy, mondaySeventeenFiftyNine)).toBe(true);
-  });
-
-  it("excludes the end of the window", () => {
-    expect(isWithinWorkingHours(policy, mondayEighteen)).toBe(false);
-  });
-
-  it("excludes a day that is not configured", () => {
-    expect(isWithinWorkingHours(policy, saturdayTen)).toBe(false);
-  });
-
-  it("supports a custom day and window", () => {
-    const custom = makePolicy((value) => {
-      value.workingHours.days = [7];
-      value.workingHours.start = "10:00";
-      value.workingHours.end = "12:00";
-    });
-    const sundayEleven = new Date(2026, 10, 1, 11, 0, 0);
-    const mondayEleven = new Date(2026, 9, 26, 11, 0, 0);
-
-    expect(isWithinWorkingHours(custom, sundayEleven)).toBe(true);
-    expect(isWithinWorkingHours(custom, mondayEleven)).toBe(false);
-  });
-
-  it("uses local machine time", () => {
-    const localNine = new Date(2026, 9, 26, 9, 0, 0);
-
-    expect(localNine.getHours()).toBe(9);
-    expect(isWithinWorkingHours(policy, localNine)).toBe(true);
   });
 });

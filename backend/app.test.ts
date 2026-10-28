@@ -744,24 +744,11 @@ function invalidPolicyCases(): readonly { label: string; body: unknown }[] {
       body: { ...base, typing: { ...base.typing, burstLength: 0 } },
     },
     {
-      label: "empty working days",
-      body: { ...base, workingHours: { ...base.workingHours, days: [] } },
-    },
-    {
-      label: "duplicate working days",
-      body: { ...base, workingHours: { ...base.workingHours, days: [1, 1] } },
-    },
-    {
-      label: "malformed start time",
-      body: { ...base, workingHours: { ...base.workingHours, start: "9:00" } },
-    },
-    {
-      label: "equal working hours",
-      body: { ...base, workingHours: { ...base.workingHours, start: "09:00", end: "09:00" } },
-    },
-    {
-      label: "window crossing midnight",
-      body: { ...base, workingHours: { ...base.workingHours, start: "22:00", end: "06:00" } },
+      label: "removed working hours field",
+      body: {
+        ...base,
+        workingHours: { days: [1, 2, 3, 4, 5], start: "09:00", end: "18:00" },
+      },
     },
     {
       label: "reading minimum above maximum",
@@ -848,7 +835,7 @@ describe("profile policy endpoints", () => {
     const profilePolicies = createFakeProfilePolicies();
     const { app } = createHarness({ profilePolicies: profilePolicies.service });
     const policy = createDefaultProfilePolicy();
-    policy.workingHours = { days: [1, 3, 5], start: "07:30", end: "16:15" };
+    policy.reading = { msPerCharacter: 25, minMs: 200, maxMs: 4_000 };
 
     const response = await app.request(
       `/v1/profiles/${profile.id}/policy`,
