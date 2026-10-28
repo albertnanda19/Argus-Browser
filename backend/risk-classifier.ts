@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { StagehandAgent } from "./stagehand-agent";
+import { AgentError, type StagehandAgent } from "./stagehand-agent";
 import type { AgentAction } from "./stagehand-runtime";
 
 const UNTRUSTED_PAGE_NOTICE =
@@ -45,13 +45,38 @@ const RISK_CLASSIFICATION_ERROR_MESSAGES: Record<
   risk_invalid_output: "Risk classification output is invalid.",
 };
 
+const DIAGNOSTIC_MAX_LENGTH = 100;
+const DIAGNOSTIC_PATTERN = /^[A-Za-z0-9_.-]+$/;
+
+function sanitizeDiagnostic(value: string): string {
+  if (!DIAGNOSTIC_PATTERN.test(value)) {
+    return "unknown";
+  }
+  return value.slice(0, DIAGNOSTIC_MAX_LENGTH);
+}
+
+function failureDiagnostic(error: unknown): string {
+  if (error instanceof AgentError) {
+    return sanitizeDiagnostic(error.code);
+  }
+  if (error instanceof Error) {
+    return sanitizeDiagnostic(error.name);
+  }
+  return "unknown";
+}
+
 export class RiskClassificationError extends Error {
   readonly code: RiskClassificationErrorCode;
+  readonly diagnostic: string | null;
 
-  constructor(code: RiskClassificationErrorCode) {
+  constructor(
+    code: RiskClassificationErrorCode,
+    diagnostic: string | null = null,
+  ) {
     super(RISK_CLASSIFICATION_ERROR_MESSAGES[code]);
     this.name = "RiskClassificationError";
     this.code = code;
+    this.diagnostic = diagnostic;
   }
 }
 
@@ -95,8 +120,11 @@ export async function classifyActionRisk(
       buildRiskInstruction(input.goal, input.action),
       riskClassificationSchema,
     );
-  } catch {
-    throw new RiskClassificationError("risk_classification_failed");
+  } catch (error) {
+    throw new RiskClassificationError(
+      "risk_classification_failed",
+      failureDiagnostic(error),
+    );
   }
 
   const parsed = riskClassificationSchema.safeParse(raw);

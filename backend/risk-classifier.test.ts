@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { AgentError } from "./stagehand-agent";
 import type { AgentAction, StagehandExtractSchema } from "./stagehand-runtime";
 import {
   classifyActionRisk,
@@ -176,6 +177,7 @@ describe("classifyActionRisk", () => {
 
     expect(error.code).toBe("risk_invalid_output");
     expect(error.message).toBe("Risk classification output is invalid.");
+    expect(error.diagnostic).toBeNull();
     expect(fake.calls).toHaveLength(1);
   });
 
@@ -204,6 +206,7 @@ describe("classifyActionRisk", () => {
     );
 
     expect(error.code).toBe("risk_invalid_output");
+    expect(error.diagnostic).toBeNull();
   });
 
   it("wraps adapter errors without exposing the raw cause", async () => {
@@ -218,10 +221,64 @@ describe("classifyActionRisk", () => {
 
     expect(error.name).toBe("RiskClassificationError");
     expect(error.code).toBe("risk_classification_failed");
+    expect(error.diagnostic).toBe("Error");
     expect(error.message).toBe("Risk classification failed.");
     expect(error.message).not.toContain(rawMessage);
     expect(error.message).not.toContain("secret-prompt");
     expect((error as { readonly cause?: unknown }).cause).toBeUndefined();
+    expect(JSON.stringify(error)).not.toContain(goal);
+    expect(JSON.stringify(error)).not.toContain(action.selector);
+    expect(JSON.stringify(error)).not.toContain(rawMessage);
+  });
+
+  it("keeps the AgentError code as the classification diagnostic", async () => {
+    const fake = createFakeAgent(async () => {
+      throw new AgentError("agent_timeout", "extract");
+    });
+
+    const error = await captureRiskError(
+      classifyActionRisk({ agent: fake.agent, goal, action }),
+    );
+
+    expect(error.name).toBe("RiskClassificationError");
+    expect(error.code).toBe("risk_classification_failed");
+    expect(error.diagnostic).toBe("agent_timeout");
+    expect(error.message).toBe("Risk classification failed.");
+  });
+
+  it("uses a sanitized Error name for non-AgentError failures", async () => {
+    const rawMessage = "secret-prompt halaman rahasia";
+    const fake = createFakeAgent(async () => {
+      const failure = new Error(rawMessage);
+      failure.name = "ProviderUnavailable";
+      throw failure;
+    });
+
+    const error = await captureRiskError(
+      classifyActionRisk({ agent: fake.agent, goal, action }),
+    );
+
+    expect(error.code).toBe("risk_classification_failed");
+    expect(error.diagnostic).toBe("ProviderUnavailable");
+    expect(error.diagnostic).not.toContain(rawMessage);
+  });
+
+  it("replaces a diagnostic with invalid characters with unknown", async () => {
+    const rawMessage = "secret-prompt halaman rahasia";
+    const fake = createFakeAgent(async () => {
+      const failure = new Error(rawMessage);
+      failure.name = "Provider Error / 429";
+      throw failure;
+    });
+
+    const error = await captureRiskError(
+      classifyActionRisk({ agent: fake.agent, goal, action }),
+    );
+
+    expect(error.code).toBe("risk_classification_failed");
+    expect(error.diagnostic).toBe("unknown");
+    expect(error.message).not.toContain("Provider Error");
+    expect(error.message).not.toContain(rawMessage);
   });
 
   it("wraps non-Error adapter failures with the same stable message", async () => {
@@ -234,6 +291,7 @@ describe("classifyActionRisk", () => {
     );
 
     expect(error.code).toBe("risk_classification_failed");
+    expect(error.diagnostic).toBe("unknown");
     expect(error.message).toBe("Risk classification failed.");
     expect(error.message).not.toContain("secret-prompt");
   });

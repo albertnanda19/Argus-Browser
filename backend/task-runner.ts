@@ -1288,10 +1288,14 @@ class TaskRunnerImpl implements TaskRunner {
         error.code === "risk_invalid_output"
           ? RISK_INVALID_OUTPUT_REASON
           : RISK_CLASSIFICATION_FAILED_REASON;
+      const errorLabel = error instanceof Error ? error.name : "unknown";
+      const diagnostic =
+        error instanceof RiskClassificationError &&
+        error.diagnostic !== null
+          ? `/${error.diagnostic}`
+          : "";
       console.warn(
-        `Task risk classification failed: ${record.taskId}: ${
-          error instanceof Error ? error.name : "unknown"
-        }`,
+        `Task risk classification failed: ${record.taskId}: ${errorLabel}${diagnostic}`,
       );
       this.recordStep({
         record,
