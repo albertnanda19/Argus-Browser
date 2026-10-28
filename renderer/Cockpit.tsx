@@ -11,6 +11,7 @@ import {
 import type { ArgusRuntime } from "./api-runtime";
 import { BrowserSetupSection } from "./BrowserSetupSection";
 import { isAbortError } from "./cockpit-state";
+import { ConversationChat } from "./ConversationChat";
 import { ProfileSection } from "./ProfileSection";
 import { SessionSection } from "./SessionSection";
 import { TaskHistoryPanel } from "./TaskHistoryPanel";
@@ -22,7 +23,6 @@ import {
   nextReconnectDelay,
   type TaskEventOverlay,
 } from "./task-chat-state";
-import { TaskChat } from "./TaskChat";
 import { texts } from "./texts";
 
 type CockpitProps = {
@@ -58,6 +58,7 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
   const [selectedProfile, setSelectedProfile] = useState<Profile | null>(null);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [isStreamDisconnected, setIsStreamDisconnected] = useState(false);
+  const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
   const [taskEvents, setTaskEvents] = useState<
     ReadonlyMap<string, TaskEventOverlay>
   >(() => new Map());
@@ -75,6 +76,10 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
     },
     [],
   );
+
+  const handleSessionChanged = useCallback((): void => {
+    setSessionRefreshKey((current) => current + 1);
+  }, []);
 
   const handleDeleted = (profileId: string): void => {
     setSelectedProfile((current) =>
@@ -187,7 +192,7 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
               onDeleted={handleDeleted}
             />
             <SessionSection
-              key={selectedProfile?.id ?? "none"}
+              key={`${selectedProfile?.id ?? "none"}:${sessionRefreshKey}`}
               runtime={runtime}
               profile={selectedProfile}
               onActiveSessionChange={handleActiveSessionChange}
@@ -218,13 +223,14 @@ export function Cockpit({ runtime, isConnected }: CockpitProps) {
               taskEvents={taskEvents}
               reconnectVersion={reconnectVersion}
             />
-            <TaskChat
-              key={`${selectedProfile?.id ?? "none"}:${sessionForProfile?.id ?? "none"}`}
+            <ConversationChat
+              key={selectedProfile?.id ?? "none"}
               runtime={runtime}
               profile={selectedProfile}
               session={sessionForProfile}
               taskEvents={taskEvents}
               reconnectVersion={reconnectVersion}
+              onSessionChanged={handleSessionChanged}
             />
           </>
         ) : (
