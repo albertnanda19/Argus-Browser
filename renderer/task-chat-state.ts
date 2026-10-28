@@ -10,6 +10,8 @@ export const MAX_RECONNECT_DELAY_MS = 10000;
 export type TaskLastStep = {
   readonly index: number;
   readonly action: string;
+  readonly target: string;
+  readonly url: string;
   readonly status: AgentStepStatus;
 };
 
@@ -113,6 +115,8 @@ export function applyTaskEvent(
         lastStep: {
           index: event.index,
           action: event.action,
+          target: event.target,
+          url: event.url,
           status: event.status,
         },
       }));
@@ -192,7 +196,13 @@ function lastStepFromSteps(steps: readonly AgentStep[]): TaskLastStep | null {
 
   return last === undefined
     ? null
-    : { index: last.index, action: last.action, status: last.result.status };
+    : {
+        index: last.index,
+        action: last.action,
+        target: last.target,
+        url: last.result.url,
+        status: last.result.status,
+      };
 }
 
 function lastVerificationReason(steps: readonly AgentStep[]): string | null {

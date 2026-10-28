@@ -6,6 +6,7 @@ import type { Task, TaskStatus } from "../shared/task";
 import { ArgusApiError } from "../shared/client";
 import type { ArgusRuntime } from "./api-runtime";
 import { isAbortError, toDisplayError } from "./cockpit-state";
+import { TaskStatusPanel } from "./TaskStatusPanel";
 import {
   createIdempotencyKey,
   effectiveTaskStatus,
@@ -399,142 +400,161 @@ export function TaskChat({
   }
 
   return (
-    <section className="panel chat-panel" aria-labelledby="workspace-heading">
-      <h2 className="panel-heading" id="workspace-heading">
-        {texts.taskChat.heading}
-      </h2>
+    <div className="workspace-grid">
+      <section className="panel chat-panel" aria-labelledby="workspace-heading">
+        <h2 className="panel-heading" id="workspace-heading">
+          {texts.taskChat.heading}
+        </h2>
 
-      {isLoading ? (
-        <p className="panel-note" role="status" aria-live="polite">
-          {texts.taskChat.loading}
-        </p>
-      ) : null}
-
-      {listError === null ? null : (
-        <>
-          <p className="form-error" role="alert">
-            {listError}
+        {isLoading ? (
+          <p className="panel-note" role="status" aria-live="polite">
+            {texts.taskChat.loading}
           </p>
-          <button
-            className="button"
-            type="button"
-            onClick={() => setReloadKey((key) => key + 1)}
-            disabled={isLoading}
-          >
-            {texts.taskChat.retry}
-          </button>
-        </>
-      )}
-
-      {!isLoading && listError === null && tasks.length === 0 ? (
-        <p className="panel-note">{texts.taskChat.empty}</p>
-      ) : null}
-
-      {tasks.length === 0 ? null : (
-        <ol className="chat-list">
-          {tasks.map((task) => {
-            const overlay = taskEvents.get(task.id);
-            const status = effectiveTaskStatus(task.status, overlay?.status);
-            const steps = stepsByTask[task.id] ?? [];
-            const isSelected = task.id === selectedTaskId;
-            const isCancellable = !isTerminalTaskStatus(status);
-            const isCancelPending = cancelPendingTaskId === task.id;
-
-            return (
-              <li
-                className="chat-task"
-                key={task.id}
-                data-selected={isSelected}
-                data-status={status}
-              >
-                <button
-                  className="chat-task-select"
-                  type="button"
-                  onClick={() => handleSelectTask(task.id)}
-                  aria-pressed={isSelected}
-                  aria-label={texts.taskChat.selectTask(task.goal)}
-                >
-                  <span className="chat-speaker">
-                    {texts.taskChat.operatorLabel}
-                  </span>
-                  <span className="chat-goal">{task.goal}</span>
-                </button>
-
-                <div className="chat-agent">
-                  <div className="chat-agent-head">
-                    <span className="chat-speaker">
-                      {texts.taskChat.agentLabel}
-                    </span>
-                    <span className="chat-status" data-status={status}>
-                      {taskStatusLabel(status)}
-                    </span>
-                  </div>
-                  <p className="chat-reply">
-                    {selectAgentReply({ status, overlay, steps })}
-                  </p>
-                </div>
-
-                {isCancellable ? (
-                  <div className="chat-task-actions">
-                    <button
-                      className="button button-quiet"
-                      type="button"
-                      onClick={() => void handleCancel(task.id)}
-                      disabled={cancelPendingTaskId !== null}
-                    >
-                      {isCancelPending
-                        ? texts.taskChat.cancelling
-                        : texts.taskChat.cancel}
-                    </button>
-                  </div>
-                ) : null}
-
-                {cancelError !== null && cancelError.taskId === task.id ? (
-                  <p className="form-error" role="alert">
-                    {cancelError.message}
-                  </p>
-                ) : null}
-              </li>
-            );
-          })}
-        </ol>
-      )}
-
-      <form className="chat-composer" onSubmit={(event) => void handleSubmit(event)}>
-        <label className="field-label" htmlFor="task-goal">
-          {texts.taskChat.goalLabel}
-        </label>
-        <textarea
-          id="task-goal"
-          className="input chat-textarea"
-          value={draft}
-          rows={3}
-          maxLength={MAX_GOAL_LENGTH}
-          placeholder={texts.taskChat.goalPlaceholder}
-          onChange={(event) => setDraft(event.target.value)}
-          disabled={!canUseComposer || hasRunningTask}
-        />
-        <div className="chat-composer-meta">
-          <span className="chat-counter">
-            {texts.taskChat.characterCount(draft.length)}
-          </span>
-          <button
-            className="button button-primary"
-            type="submit"
-            disabled={!canSend}
-          >
-            {isSubmitting ? texts.taskChat.sending : texts.taskChat.send}
-          </button>
-        </div>
-        {hasRunningTask ? (
-          <p className="panel-note">{texts.taskChat.blocked}</p>
         ) : null}
-        {submitError === null ? null : (
-          <p className="form-error" role="alert">
-            {submitError}
-          </p>
+
+        {listError === null ? null : (
+          <>
+            <p className="form-error" role="alert">
+              {listError}
+            </p>
+            <button
+              className="button"
+              type="button"
+              onClick={() => setReloadKey((key) => key + 1)}
+              disabled={isLoading}
+            >
+              {texts.taskChat.retry}
+            </button>
+          </>
         )}
-      </form>
-    </section>
+
+        {!isLoading && listError === null && tasks.length === 0 ? (
+          <p className="panel-note">{texts.taskChat.empty}</p>
+        ) : null}
+
+        {tasks.length === 0 ? null : (
+          <ol className="chat-list">
+            {tasks.map((task) => {
+              const overlay = taskEvents.get(task.id);
+              const status = effectiveTaskStatus(task.status, overlay?.status);
+              const steps = stepsByTask[task.id] ?? [];
+              const isSelected = task.id === selectedTaskId;
+              const isCancellable = !isTerminalTaskStatus(status);
+              const isCancelPending = cancelPendingTaskId === task.id;
+
+              return (
+                <li
+                  className="chat-task"
+                  key={task.id}
+                  data-selected={isSelected}
+                  data-status={status}
+                >
+                  <button
+                    className="chat-task-select"
+                    type="button"
+                    onClick={() => handleSelectTask(task.id)}
+                    aria-pressed={isSelected}
+                    aria-label={texts.taskChat.selectTask(task.goal)}
+                  >
+                    <span className="chat-speaker">
+                      {texts.taskChat.operatorLabel}
+                    </span>
+                    <span className="chat-goal">{task.goal}</span>
+                  </button>
+
+                  <div className="chat-agent">
+                    <div className="chat-agent-head">
+                      <span className="chat-speaker">
+                        {texts.taskChat.agentLabel}
+                      </span>
+                      <span className="chat-status" data-status={status}>
+                        {taskStatusLabel(status)}
+                      </span>
+                    </div>
+                    <p className="chat-reply">
+                      {selectAgentReply({ status, overlay, steps })}
+                    </p>
+                  </div>
+
+                  {isCancellable ? (
+                    <div className="chat-task-actions">
+                      <button
+                        className="button button-quiet"
+                        type="button"
+                        onClick={() => void handleCancel(task.id)}
+                        disabled={cancelPendingTaskId !== null}
+                      >
+                        {isCancelPending
+                          ? texts.taskChat.cancelling
+                          : texts.taskChat.cancel}
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {cancelError !== null && cancelError.taskId === task.id ? (
+                    <p className="form-error" role="alert">
+                      {cancelError.message}
+                    </p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ol>
+        )}
+
+        <form
+          className="chat-composer"
+          onSubmit={(event) => void handleSubmit(event)}
+        >
+          <label className="field-label" htmlFor="task-goal">
+            {texts.taskChat.goalLabel}
+          </label>
+          <textarea
+            id="task-goal"
+            className="input chat-textarea"
+            value={draft}
+            rows={3}
+            maxLength={MAX_GOAL_LENGTH}
+            placeholder={texts.taskChat.goalPlaceholder}
+            onChange={(event) => setDraft(event.target.value)}
+            disabled={!canUseComposer || hasRunningTask}
+          />
+          <div className="chat-composer-meta">
+            <span className="chat-counter">
+              {texts.taskChat.characterCount(draft.length)}
+            </span>
+            <button
+              className="button button-primary"
+              type="submit"
+              disabled={!canSend}
+            >
+              {isSubmitting ? texts.taskChat.sending : texts.taskChat.send}
+            </button>
+          </div>
+          {hasRunningTask ? (
+            <p className="panel-note">{texts.taskChat.blocked}</p>
+          ) : null}
+          {submitError === null ? null : (
+            <p className="form-error" role="alert">
+              {submitError}
+            </p>
+          )}
+        </form>
+      </section>
+
+      <TaskStatusPanel
+        runtime={runtime}
+        profile={profile}
+        session={session}
+        task={selectedTask ?? null}
+        status={selectedStatus ?? null}
+        steps={selectedTask === undefined ? [] : (stepsByTask[selectedTask.id] ?? [])}
+        overlayStep={
+          selectedTask === undefined
+            ? undefined
+            : taskEvents.get(selectedTask.id)?.lastStep
+        }
+      />
+    </div>
   );
 }

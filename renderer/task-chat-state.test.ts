@@ -185,6 +185,8 @@ describe("applyTaskEvent", () => {
     expect(overlay?.lastStep).toEqual({
       index: 3,
       action: "click",
+      target: "Tombol kirim",
+      url: "https://example.com",
       status: "done",
     });
     expect(overlay?.status).toBe("running");
@@ -327,7 +329,13 @@ describe("selectAgentReply", () => {
       selectAgentReply({
         status: "running",
         overlay: {
-          lastStep: { index: 2, action: "click", status: "done" },
+          lastStep: {
+            index: 2,
+            action: "click",
+            target: "Tombol kirim",
+            url: "https://example.com/kirim?token=rahasia#hasil",
+            status: "done",
+          },
         },
         steps: [],
       }),
