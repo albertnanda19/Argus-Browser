@@ -278,6 +278,111 @@ function extractGoalUrl(goal: string): string | null {
   return match[0].replace(/[.,;:!?)\]}]+$/, "");
 }
 
+const BARE_DOMAIN_PATTERN =
+  /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d{1,5})?(?:[/?#]\S*)?$/i;
+
+const FILE_EXTENSIONS = new Set([
+  "pdf",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+  "txt",
+  "csv",
+  "json",
+  "zip",
+  "doc",
+  "docx",
+  "xls",
+  "xlsx",
+  "ppt",
+  "pptx",
+  "mp4",
+  "mp3",
+  "html",
+  "js",
+  "css",
+]);
+
+const SEARCH_INTENT_PATTERN = /\b(?:cari|carikan|temukan|search|googling|google)\b/i;
+
+const LEADING_COMMAND_PATTERN =
+  /^(?:saya\s+ingin\s+anda|tolong|coba|buka|carikan|cari|temukan|search|googling|website|situs|di|pada)\b[\s,:-]*/i;
+
+const GOOGLE_SEARCH_URL = "https://www.google.com/search?q=";
+
+function stripTokenPunctuation(token: string): string {
+  return token
+    .replace(/^[("'[{]+/, "")
+    .replace(/[.,;:!?)\]}]+$/, "");
+}
+
+function resolveBareDomain(goal: string): string | null {
+  for (const rawToken of goal.split(/\s+/)) {
+    const token = stripTokenPunctuation(rawToken);
+    if (token.includes("@") || !BARE_DOMAIN_PATTERN.test(token)) {
+      continue;
+    }
+
+    const [host = ""] = token.split(/[/?#]/);
+    const [hostname = ""] = host.split(":");
+    const extension = (hostname.split(".").at(-1) ?? "").toLowerCase();
+    if (FILE_EXTENSIONS.has(extension)) {
+      continue;
+    }
+
+    return `https://${token}`;
+  }
+
+  return null;
+}
+
+function resolveSearchUrl(goal: string): string | null {
+  if (!SEARCH_INTENT_PATTERN.test(goal)) {
+    return null;
+  }
+
+  let query = goal.trim();
+  for (;;) {
+    const stripped = query.replace(LEADING_COMMAND_PATTERN, "").trim();
+    if (stripped === query) {
+      break;
+    }
+    query = stripped;
+  }
+
+  if (query.length === 0) {
+    return null;
+  }
+
+  return `${GOOGLE_SEARCH_URL}${encodeURIComponent(query)}`;
+}
+
+export function resolveNavigationTarget(goal: string): string | null {
+  const explicit = extractGoalUrl(goal);
+  if (explicit !== null) {
+    return explicit;
+  }
+
+  return resolveBareDomain(goal) ?? resolveSearchUrl(goal);
+}
+
+function normalizePageUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}${url.search}`;
+  } catch {
+    return null;
+  }
+}
+
+function isSamePageUrl(currentUrl: string, targetUrl: string): boolean {
+  const current = normalizePageUrl(currentUrl);
+  return current !== null && current === normalizePageUrl(targetUrl);
+}
+
 function isExtractionEnvelope(
   value: unknown,
 ): value is { readonly extraction: string } {
@@ -989,14 +1094,20 @@ class TaskRunnerImpl implements TaskRunner {
 
     const page = context.pages().at(-1) ?? (await context.newPage());
     const currentUrl = page.url();
-    if (currentUrl.length > 0 && currentUrl !== "about:blank") {
-      return "skipped";
-    }
+    const target = resolveNavigationTarget(goal);
+    const isEmptyPage = currentUrl.length === 0 || currentUrl === "about:blank";
 
-    const goalUrl = extractGoalUrl(goal);
-    if (goalUrl === null) {
+    if (target === null) {
+      if (!isEmptyPage) {
+        return "skipped";
+      }
+
       this.failTask(record, EMPTY_START_PAGE_REASON);
       return "failed";
+    }
+
+    if (!isEmptyPage && isSamePageUrl(currentUrl, target)) {
+      return "skipped";
     }
 
     const startedAtMs = this.now().getTime();
@@ -1004,7 +1115,7 @@ class TaskRunnerImpl implements TaskRunner {
     try {
       await raceAbort(
         Promise.resolve().then(() =>
-          page.goto(goalUrl, { timeout: NAVIGATION_TIMEOUT_MS }),
+          page.goto(target, { timeout: NAVIGATION_TIMEOUT_MS }),
         ),
         record.controller.signal,
       );
@@ -1021,7 +1132,7 @@ class TaskRunnerImpl implements TaskRunner {
       this.recordStep({
         record,
         action: "navigate",
-        target: goalUrl,
+        target,
         startedAtMs,
         url: page.url(),
         pageChanged: false,
@@ -1035,7 +1146,7 @@ class TaskRunnerImpl implements TaskRunner {
     this.recordStep({
       record,
       action: "navigate",
-      target: goalUrl,
+      target,
       startedAtMs,
       url: page.url(),
       pageChanged: true,

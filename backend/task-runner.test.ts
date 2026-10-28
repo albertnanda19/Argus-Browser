@@ -34,6 +34,7 @@ import { createTaskManager, type TaskService } from "./task-manager";
 import {
   createTaskRunner,
   parseVerification,
+  resolveNavigationTarget,
   verificationSchema,
   type TaskAgentFactory,
   type TaskInputExecutorFactory,
@@ -584,6 +585,74 @@ describe("parseVerification", () => {
   });
 });
 
+describe("resolveNavigationTarget", () => {
+  it("returns the first explicit URL without trailing punctuation", () => {
+    expect(
+      resolveNavigationTarget(
+        "Buka https://satu.test/halaman., lalu https://dua.test/halaman)",
+      ),
+    ).toBe("https://satu.test/halaman");
+  });
+
+  it("adds a scheme to a bare domain", () => {
+    expect(resolveNavigationTarget("Buka dibimbing.id")).toBe(
+      "https://dibimbing.id",
+    );
+  });
+
+  it("adds a scheme to a www domain", () => {
+    expect(resolveNavigationTarget("Kunjungi www.dibimbing.id, ya")).toBe(
+      "https://www.dibimbing.id",
+    );
+  });
+
+  it("keeps the path and query of a bare domain", () => {
+    expect(resolveNavigationTarget("Buka contoh.co.id/path?x=1")).toBe(
+      "https://contoh.co.id/path?x=1",
+    );
+  });
+
+  it("ignores an email address", () => {
+    expect(resolveNavigationTarget("Kirim email ke user@example.com")).toBeNull();
+  });
+
+  it("ignores a version number", () => {
+    expect(resolveNavigationTarget("Versi 1.2.3")).toBeNull();
+  });
+
+  it.each(["laporan.pdf", "gambar.png", "data.json", "arsip.zip"])(
+    "ignores the file name %s",
+    (fileName) => {
+      expect(resolveNavigationTarget(`Unggah ${fileName}`)).toBeNull();
+    },
+  );
+
+  it("prefers an explicit URL over a search intent", () => {
+    expect(resolveNavigationTarget("Cari https://contoh.test/halaman")).toBe(
+      "https://contoh.test/halaman",
+    );
+  });
+
+  it("builds a Google search URL from a search intent", () => {
+    expect(resolveNavigationTarget("Cari kontak dibimbing")).toBe(
+      "https://www.google.com/search?q=kontak%20dibimbing",
+    );
+  });
+
+  it("removes leading command words from the search query", () => {
+    expect(resolveNavigationTarget("Tolong cari kontak dibimbing")).toBe(
+      "https://www.google.com/search?q=kontak%20dibimbing",
+    );
+  });
+
+  it("returns null when the search query is empty", () => {
+    expect(resolveNavigationTarget("Tolong cari")).toBeNull();
+  });
+
+  it("returns null when the goal has no target", () => {
+    expect(resolveNavigationTarget("Buka halaman kontak")).toBeNull();
+  });
+});
 
 describe("task runner", () => {
   it("completes a task after one verified step and stores the step", async () => {
@@ -1942,8 +2011,8 @@ describe("task runner pre-navigation", () => {
     expect(Object.keys(navigationEvent).sort()).toEqual(AGENT_STEP_KEYS);
   });
 
-  it("does not navigate when the active page is already open", async () => {
-    const sessions = createFakeSessions();
+  it("does not navigate when the active page already matches the goal URL", async () => {
+    const sessions = createFakeSessions({ initialUrl: goalUrl });
     const fake = createFakeAgent();
     const harness = createRunnerHarness({
       sessions,
@@ -1961,6 +2030,91 @@ describe("task runner pre-navigation", () => {
     expect(harness.steps.last(task.id)).toMatchObject({
       index: 1,
       action: "act",
+    });
+  });
+
+  it("keeps the active page when the goal has no target", async () => {
+    const sessions = createFakeSessions();
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks, "Buka halaman kontak");
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toHaveLength(0);
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+  });
+
+  it("navigates to a bare domain from an empty page", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks, "Buka dibimbing.id");
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toEqual([
+      { url: "https://dibimbing.id", timeout: 30_000 },
+    ]);
+    expect(harness.steps.list(task.id)[0]).toMatchObject({
+      action: "navigate",
+      target: "https://dibimbing.id",
+    });
+  });
+
+  it("navigates when the active page differs from the goal domain", async () => {
+    const sessions = createFakeSessions();
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks, "Buka dibimbing.id");
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toEqual([
+      { url: "https://dibimbing.id", timeout: 30_000 },
+    ]);
+    expect(harness.steps.list(task.id)).toHaveLength(2);
+  });
+
+  it("navigates to Google when the goal asks to search", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const searchUrl = "https://www.google.com/search?q=kontak%20dibimbing";
+    const task = createTask(harness.tasks, "Cari kontak dibimbing");
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toEqual([
+      { url: searchUrl, timeout: 30_000 },
+    ]);
+    expect(harness.steps.list(task.id)[0]).toMatchObject({
+      action: "navigate",
+      target: searchUrl,
     });
   });
 
