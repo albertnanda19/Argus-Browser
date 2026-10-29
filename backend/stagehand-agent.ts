@@ -6,6 +6,7 @@ import {
   createStagehandRuntime,
   type AgentActSummary,
   type AgentAction,
+  type ClientModelGenerate,
   type StagehandExtractSchema,
   type StagehandRuntime,
   type StagehandRuntimeFactory,
@@ -63,10 +64,11 @@ export type ProviderCause = {
 
 const MAX_CAUSE_DEPTH = 6;
 const MAX_CAUSE_NODES = 50;
+const MAX_ERROR_CHAIN_LENGTH = 4;
 const MAX_PROVIDER_JSON_LENGTH = 100_000;
 const MAX_RETRY_DELAY_SECONDS = 99_999_999;
 const NETWORK_ERROR_CODES = ["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN"];
-const QUOTA_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,100}$/;
+const SANITIZED_METADATA_PATTERN = /^[A-Za-z0-9_.:-]{1,100}$/;
 const RETRY_DELAY_TEXT_PATTERN =
   /\bretry(?:\s+(?:in|after)|delay)\s*[:=]?\s*(\d{1,9})\s*s\b/i;
 const STATUS_KEYS = new Set(["status", "statuscode", "httpstatus"]);
@@ -111,6 +113,8 @@ const KNOWN_PROVIDER_KEYS = [
   "retryAfterSeconds",
   "quotaId",
   "limitSource",
+  "errorType",
+  "providerCode",
   "name",
   "message",
   "responseBody",
@@ -122,6 +126,9 @@ type ProviderSignals = {
   httpStatus: number | null;
   retryDelaySeconds: number | null;
   quotaId: string | null;
+  errorType: string | null;
+  providerCode: string | null;
+  limitSource: string | null;
   hasQuota: boolean;
   hasSchema: boolean;
   hasNetworkCode: boolean;
@@ -140,11 +147,95 @@ function readProviderProperty(value: object, key: string): unknown {
   }
 }
 
+function readSanitizedErrorString(value: unknown): string | null {
+  return typeof value === "string" && SANITIZED_METADATA_PATTERN.test(value)
+    ? value
+    : null;
+}
+
+function readErrorName(value: object): string | null {
+  return readSanitizedErrorString(readProviderProperty(value, "name"));
+}
+
+function nextErrorLink(value: object): object | null {
+  for (const key of ["cause", "lastError"] as const) {
+    const link = readProviderProperty(value, key);
+    if (typeof link === "object" && link !== null) {
+      return link;
+    }
+  }
+
+  const errors = readProviderProperty(value, "errors");
+  if (Array.isArray(errors)) {
+    for (const entry of errors) {
+      if (typeof entry === "object" && entry !== null) {
+        return entry;
+      }
+    }
+  }
+
+  return null;
+}
+
+type ErrorIdentity = {
+  readonly name: string | null;
+  readonly code: string | null;
+  readonly chain: readonly string[];
+};
+
+function collectErrorIdentity(error: unknown): ErrorIdentity {
+  const names: string[] = [];
+  const seen = new Set<object>();
+  let code: string | null = null;
+  let current: unknown = error;
+  let depth = 0;
+
+  while (
+    typeof current === "object" &&
+    current !== null &&
+    !seen.has(current) &&
+    depth < MAX_CAUSE_DEPTH
+  ) {
+    seen.add(current);
+    depth += 1;
+
+    if (Array.isArray(current)) {
+      current = current.find(
+        (entry) => typeof entry === "object" && entry !== null,
+      );
+      continue;
+    }
+
+    if (names.length < MAX_ERROR_CHAIN_LENGTH) {
+      const name = readErrorName(current);
+      if (name !== null) {
+        names.push(name);
+      }
+    }
+
+    if (code === null) {
+      code = readSanitizedErrorString(readProviderProperty(current, "code"));
+    }
+
+    current = nextErrorLink(current);
+  }
+
+  const name =
+    typeof error === "object" && error !== null && !Array.isArray(error)
+      ? readErrorName(error)
+      : null;
+
+  return { name, code, chain: names };
+}
+
 function emptyProviderSignals(): ProviderSignals {
   return {
     httpStatus: null,
     retryDelaySeconds: null,
     quotaId: null,
+    errorType: null,
+    providerCode: null,
+    limitSource: null,
     hasQuota: false,
     hasSchema: false,
     hasNetworkCode: false,
@@ -212,9 +303,33 @@ function inspectProviderScalar(
 
   if (normalizedKey === "quotaid") {
     signals.hasQuota = true;
-    if (QUOTA_ID_PATTERN.test(text) && signals.quotaId === null) {
+    if (SANITIZED_METADATA_PATTERN.test(text) && signals.quotaId === null) {
       signals.quotaId = text;
     }
+  }
+
+  if (
+    normalizedKey === "errortype" &&
+    signals.errorType === null &&
+    SANITIZED_METADATA_PATTERN.test(value)
+  ) {
+    signals.errorType = value;
+  }
+
+  if (
+    normalizedKey === "providercode" &&
+    signals.providerCode === null &&
+    SANITIZED_METADATA_PATTERN.test(value)
+  ) {
+    signals.providerCode = value;
+  }
+
+  if (
+    normalizedKey === "limitsource" &&
+    signals.limitSource === null &&
+    SANITIZED_METADATA_PATTERN.test(value)
+  ) {
+    signals.limitSource = value;
   }
 
   if (
@@ -426,14 +541,34 @@ function resolveProviderKind(signals: ProviderSignals): ProviderCauseKind {
   return "unknown";
 }
 
-function classifyProviderCause(error: unknown): ProviderCause {
-  const signals = collectProviderSignals(error);
+function buildProviderCause(signals: ProviderSignals): ProviderCause {
   return {
     kind: resolveProviderKind(signals),
     httpStatus: signals.httpStatus,
     retryDelaySeconds: signals.retryDelaySeconds,
     quotaId: signals.quotaId,
   };
+}
+
+function logOperationFailure(
+  operation: AgentOperation,
+  code: AgentErrorCode,
+  cause: ProviderCause,
+  signals: ProviderSignals,
+  error: unknown,
+): void {
+  const identity = collectErrorIdentity(error);
+  const status = cause.httpStatus ?? "none";
+  const retryAfter = cause.retryDelaySeconds ?? "none";
+  const errorType = signals.errorType ?? "none";
+  const providerCode = signals.providerCode ?? "none";
+  const limitSource = signals.limitSource ?? "none";
+  const errorName = identity.name ?? "none";
+  const errorCode = identity.code ?? "none";
+  const chain = identity.chain.length > 0 ? identity.chain.join(">") : "none";
+  console.warn(
+    `Agent operation failed: op=${operation} code=${code} cause=${cause.kind} status=${status} retryAfter=${retryAfter} errorType=${errorType} providerCode=${providerCode} limitSource=${limitSource} error=${errorName} errorCode=${errorCode} chain=${chain}`,
+  );
 }
 
 const AGENT_ERROR_MESSAGES: Record<AgentErrorCode, string> = {
@@ -526,17 +661,60 @@ function runOperation<T>(operation: () => Promise<T>): Promise<T> {
   return Promise.resolve().then(operation);
 }
 
+class ProviderFailureCapture {
+  private error: unknown = null;
+  private isCaptured = false;
+
+  record(error: unknown): void {
+    this.error = error;
+    this.isCaptured = true;
+  }
+
+  clear(): void {
+    this.error = null;
+    this.isCaptured = false;
+  }
+
+  take(): unknown {
+    if (!this.isCaptured) {
+      return null;
+    }
+    const error = this.error;
+    this.clear();
+    return error;
+  }
+}
+
+function captureClientGenerate(
+  generate: ClientModelGenerate,
+  capture: ProviderFailureCapture,
+): ClientModelGenerate {
+  return async (request) => {
+    try {
+      const result = await generate(request);
+      capture.clear();
+      return result;
+    } catch (error) {
+      capture.record(error);
+      throw error;
+    }
+  };
+}
+
 class StagehandAgentImpl implements StagehandAgent {
   private readonly runtime: StagehandRuntime;
   private readonly onProviderFailure: (cause: ProviderCause) => void;
+  private readonly failureCapture: ProviderFailureCapture;
   private closePromise: Promise<void> | null = null;
 
   constructor(
     runtime: StagehandRuntime,
     onProviderFailure: (cause: ProviderCause) => void = () => undefined,
+    failureCapture: ProviderFailureCapture = new ProviderFailureCapture(),
   ) {
     this.runtime = runtime;
     this.onProviderFailure = onProviderFailure;
+    this.failureCapture = failureCapture;
   }
 
   async snapshot(options?: {
@@ -677,27 +855,60 @@ class StagehandAgentImpl implements StagehandAgent {
     }
   }
 
+  private recoverProviderFailure(error: unknown): {
+    readonly cause: ProviderCause;
+    readonly signals: ProviderSignals;
+  } {
+    const signals = collectProviderSignals(error);
+    const cause = buildProviderCause(signals);
+    if (cause.kind !== "unknown") {
+      return { cause, signals };
+    }
+
+    const captured = this.failureCapture.take();
+    if (captured === null) {
+      return { cause, signals };
+    }
+
+    const capturedSignals = collectProviderSignals(captured);
+    const capturedCause = buildProviderCause(capturedSignals);
+    return capturedCause.kind === "unknown"
+      ? { cause, signals }
+      : { cause: capturedCause, signals: capturedSignals };
+  }
+
   private mapFailure(
     error: unknown,
     operation: AgentOperation,
     failureCode: AgentErrorCode,
   ): AgentError {
     if (error instanceof AgentError) {
+      const signals = collectProviderSignals(error);
+      logOperationFailure(
+        operation,
+        error.code,
+        error.providerCause ?? buildProviderCause(signals),
+        signals,
+        error,
+      );
       return error;
     }
 
     if (error instanceof TimeoutSignal) {
-      return new AgentError("agent_timeout", operation, false, {
+      const providerCause: ProviderCause = {
         kind: "timeout",
         httpStatus: null,
         retryDelaySeconds: null,
         quotaId: null,
-      });
+      };
+      logOperationFailure(operation, "agent_timeout", providerCause, emptyProviderSignals(), error);
+      return new AgentError("agent_timeout", operation, false, providerCause);
     }
 
-    const providerCause = classifyProviderCause(error);
-    this.onProviderFailure(providerCause);
-    return new AgentError(failureCode, operation, false, providerCause);
+    const { cause, signals } = this.recoverProviderFailure(error);
+    this.onProviderFailure(cause);
+    logOperationFailure(operation, failureCode, cause, signals, error);
+    return new AgentError(failureCode, operation, false, cause);
   }
 }
 
@@ -742,10 +953,18 @@ export async function createStagehandAgent(
     throw new AgentError("agent_provider_keys_rejected");
   }
 
-  const model = adapter.createModelConfig({
+  const failureCapture = new ProviderFailureCapture();
+  const baseModel = adapter.createModelConfig({
     model: active.model,
     apiKey: selection.apiKey,
   });
+  const model =
+    baseModel.kind === "client"
+      ? {
+          kind: "client" as const,
+          generate: captureClientGenerate(baseModel.generate, failureCapture),
+        }
+      : baseModel;
   const createRuntime = options.createRuntime ?? createStagehandRuntime;
   const runtimePromise = runOperation(() =>
     createRuntime({
@@ -756,17 +975,21 @@ export async function createStagehandAgent(
 
   try {
     const runtime = await withTimeout(runtimePromise, INIT_TIMEOUT_MS);
-    return new StagehandAgentImpl(runtime, (cause) => {
-      const kind = toKeyFailureKind(cause.kind);
-      if (kind !== null) {
-        options.providers.markKeyFailure(
-          active.provider,
-          selection.keyId,
-          kind,
-          cause.retryDelaySeconds,
-        );
-      }
-    });
+    return new StagehandAgentImpl(
+      runtime,
+      (cause) => {
+        const kind = toKeyFailureKind(cause.kind);
+        if (kind !== null) {
+          options.providers.markKeyFailure(
+            active.provider,
+            selection.keyId,
+            kind,
+            cause.retryDelaySeconds,
+          );
+        }
+      },
+      failureCapture,
+    );
   } catch (error) {
     void runtimePromise
       .then((lateRuntime) =>

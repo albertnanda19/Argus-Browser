@@ -11,6 +11,7 @@ import type { ProviderAdapter, ProviderRegistry } from "./provider-registry";
 import { providerKeyId } from "./provider-key-pool";
 import type { ProviderService } from "./provider-service";
 import type { StoredProviderConfig } from "./provider-store";
+import { GroqError, createGroqGenerate } from "./groq-provider";
 import { createOpenRouterGenerate } from "./openrouter-provider";
 import type {
   AgentAction,
@@ -260,14 +261,14 @@ function createOpenRouterFailureFixture(response: Response): AgentFixture {
     adapter: openRouterAdapter,
     runtime: createRuntime({
       async observe() {
-        await generate(openRouterGenerateRequest());
+        await generate(clientGenerateRequest());
         return [];
       },
     }),
   });
 }
 
-function openRouterGenerateRequest(): Parameters<ClientModelGenerate>[0] {
+function clientGenerateRequest(): Parameters<ClientModelGenerate>[0] {
   return {
     messages: [
       {
@@ -276,6 +277,80 @@ function openRouterGenerateRequest(): Parameters<ClientModelGenerate>[0] {
       },
     ],
   };
+}
+
+function createClientAdapter(generate: ClientModelGenerate): ProviderAdapter {
+  return {
+    id: "groq",
+    createModelConfig: () => ({ kind: "client", generate }),
+    async validateCredentials() {
+      return { ok: true };
+    },
+  };
+}
+
+async function rpcWrappedGenerateFailure(
+  generate: ClientModelGenerate,
+): Promise<never> {
+  try {
+    await generate(clientGenerateRequest());
+  } catch (error) {
+    throw new Error("Internal error", {
+      cause: {
+        code: -32603,
+        message: error instanceof Error ? error.message : "Internal error",
+        data: { name: error instanceof Error ? error.name : "Error" },
+      },
+    });
+  }
+  throw new Error("Internal error");
+}
+
+type ClientFailureBehavior = (
+  generate: ClientModelGenerate,
+) => Promise<never>;
+
+function createClientFailureFixture(input: {
+  readonly generate: ClientModelGenerate;
+  readonly providers?: ProviderService;
+  readonly fail?: ClientFailureBehavior;
+}): AgentFixture {
+  const runtimeOptions: StagehandRuntimeOptions[] = [];
+  const fail = input.fail ?? rpcWrappedGenerateFailure;
+
+  return {
+    runtimeOptions,
+    createAgent: () =>
+      createStagehandAgent({
+        credentials: FAKE_CREDENTIALS,
+        providers:
+          input.providers ??
+          createProviderService(() =>
+            activeConfig({ provider: "groq", model: "qwen/qwen3.8-27b" }),
+          ),
+        registry: createRegistry(createClientAdapter(input.generate)),
+        createRuntime: async (options) => {
+          runtimeOptions.push(options);
+          if (options.model.kind !== "client") {
+            throw new Error("Expected a client model config.");
+          }
+          const generate = options.model.generate;
+          return createRuntime({
+            async extractStructured() {
+              return fail(generate);
+            },
+          });
+        },
+      }),
+  };
+}
+
+function captureWarnings(): string[] {
+  const warnings: string[] = [];
+  vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+    warnings.push(args.map((argument) => String(argument)).join(" "));
+  });
+  return warnings;
 }
 
 afterEach(() => {
@@ -1912,6 +1987,466 @@ describe("provider cause", () => {
 
     expect(error).toBe(original);
     expect(error).toMatchObject({ providerCause: cause });
+
+    await agent.close();
+  });
+});
+
+describe("wrapped provider failures", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const structuredSchema = z.strictObject({ stepOk: z.boolean() });
+
+  function groqRateLimitedGenerate(): ClientModelGenerate {
+    return createGroqGenerate({
+      model: "qwen/qwen3.8-27b",
+      apiKey: FAKE_API_KEY,
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "Too many requests.",
+              type: "rate_limit_exceeded",
+              code: "rate_limit_exceeded",
+              metadata: { limit_source: "groq_tpm" },
+            },
+          }),
+          {
+            status: 429,
+            headers: {
+              "Content-Type": "application/json",
+              "Retry-After": "12",
+            },
+          },
+        ),
+    });
+  }
+
+  it("recovers a rate limited Groq failure wrapped by Stagehand", async () => {
+    const warnings = captureWarnings();
+    const keyId = providerKeyId(FAKE_API_KEY);
+    const marks: {
+      readonly provider: string;
+      readonly keyId: string;
+      readonly kind: string;
+      readonly retryDelaySeconds: number | null;
+    }[] = [];
+    const fixture = createClientFailureFixture({
+      generate: groqRateLimitedGenerate(),
+      providers: createProviderService(
+        () => activeConfig({ provider: "groq", model: "qwen/qwen3.8-27b" }),
+        {
+          acquireKey: () => ({ status: "selected", keyId, apiKey: FAKE_API_KEY }),
+          markKeyFailure(provider, failedKeyId, kind, retryDelaySeconds) {
+            marks.push({
+              provider,
+              keyId: failedKeyId,
+              kind,
+              retryDelaySeconds,
+            });
+          },
+        },
+      ),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent
+      .extractStructured("Verify the step", structuredSchema)
+      .catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      code: "agent_extract_failed",
+      providerCause: {
+        kind: "rate_limited",
+        httpStatus: 429,
+        retryDelaySeconds: 12,
+        quotaId: null,
+      },
+    });
+    expect(warnings).toEqual([
+      "Agent operation failed: op=extract code=agent_extract_failed cause=rate_limited status=429 retryAfter=12 errorType=rate_limit_exceeded providerCode=rate_limit_exceeded limitSource=groq_tpm error=Error errorCode=none chain=Error",
+    ]);
+    expect(marks).toEqual([
+      {
+        provider: "groq",
+        keyId,
+        kind: "rate_limited",
+        retryDelaySeconds: 12,
+      },
+    ]);
+
+    await agent.close();
+  });
+
+  it("recovers a credits exhausted Groq 402 wrapped by Stagehand", async () => {
+    const warnings = captureWarnings();
+    const generate = createGroqGenerate({
+      model: "qwen/qwen3.8-27b",
+      apiKey: FAKE_API_KEY,
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "requires more credits",
+              type: "insufficient_quota",
+              code: "insufficient_quota",
+            },
+          }),
+          { status: 402, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    const fixture = createClientFailureFixture({ generate });
+    const agent = await fixture.createAgent();
+
+    const error = await agent
+      .extractStructured("Verify the step", structuredSchema)
+      .catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      code: "agent_extract_failed",
+      providerCause: {
+        kind: "credits_exhausted",
+        httpStatus: 402,
+        retryDelaySeconds: null,
+        quotaId: null,
+      },
+    });
+    expect(warnings).toEqual([
+      "Agent operation failed: op=extract code=agent_extract_failed cause=credits_exhausted status=402 retryAfter=none errorType=insufficient_quota providerCode=insufficient_quota limitSource=none error=Error errorCode=none chain=Error",
+    ]);
+
+    await agent.close();
+  });
+
+  it("keeps a plain failure unknown when generate never failed", async () => {
+    const warnings = captureWarnings();
+    const generate = vi.fn<ClientModelGenerate>();
+    const fixture = createClientFailureFixture({
+      generate,
+      fail: async () => {
+        throw new Error("Page is not ready.");
+      },
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent
+      .extractStructured("Verify the step", structuredSchema)
+      .catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      code: "agent_extract_failed",
+      providerCause: { kind: "unknown", httpStatus: null },
+    });
+    expect(generate).not.toHaveBeenCalled();
+    expect(warnings).toEqual([
+      "Agent operation failed: op=extract code=agent_extract_failed cause=unknown status=none retryAfter=none errorType=none providerCode=none limitSource=none error=Error errorCode=none chain=Error",
+    ]);
+
+    await agent.close();
+  });
+
+  it("uses a captured provider failure only once", async () => {
+    const warnings = captureWarnings();
+    let calls = 0;
+    const fixture = createClientFailureFixture({
+      generate: groqRateLimitedGenerate(),
+      fail: async (generate) => {
+        calls += 1;
+        if (calls === 1) {
+          return rpcWrappedGenerateFailure(generate);
+        }
+        throw new Error("Page is not ready.");
+      },
+    });
+    const agent = await fixture.createAgent();
+
+    const first = await agent
+      .extractStructured("Verify the step", structuredSchema)
+      .catch((failure: unknown) => failure);
+    const second = await agent
+      .extractStructured("Verify the step", structuredSchema)
+      .catch((failure: unknown) => failure);
+
+    expect(first).toMatchObject({
+      providerCause: { kind: "rate_limited", httpStatus: 429 },
+    });
+    expect(second).toMatchObject({
+      providerCause: { kind: "unknown", httpStatus: null },
+    });
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toBe(
+      "Agent operation failed: op=extract code=agent_extract_failed cause=unknown status=none retryAfter=none errorType=none providerCode=none limitSource=none error=Error errorCode=none chain=Error",
+    );
+
+    await agent.close();
+  });
+
+  it("does not share a captured provider failure between agents", async () => {
+    const firstFixture = createClientFailureFixture({
+      generate: groqRateLimitedGenerate(),
+    });
+    const first = await firstFixture.createAgent();
+    const firstModel = firstFixture.runtimeOptions[0]?.model;
+    if (firstModel?.kind !== "client") {
+      throw new Error("Expected a client model config.");
+    }
+    await firstModel.generate(clientGenerateRequest()).catch(() => undefined);
+    await first.close();
+
+    const secondFixture = createClientFailureFixture({
+      generate: vi.fn<ClientModelGenerate>(),
+      fail: async () => {
+        throw new Error("Page is not ready.");
+      },
+    });
+    const second = await secondFixture.createAgent();
+
+    const error = await second
+      .extractStructured("Verify the step", structuredSchema)
+      .catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      code: "agent_extract_failed",
+      providerCause: { kind: "unknown", httpStatus: null },
+    });
+
+    await second.close();
+  });
+});
+
+describe("operation failure logs", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("logs a Groq 400 with provider metadata for extract", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async extractStructured() {
+          throw new GroqError("groq_generate_failed", "Panggilan model Groq gagal.", {
+            httpStatus: 400,
+            providerCode: "json_validate_failed",
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(
+      agent.extractStructured("Verify the step", z.strictObject({ stepOk: z.boolean() })),
+    ).rejects.toMatchObject({ code: "agent_extract_failed" });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=extract code=agent_extract_failed cause=unknown status=400 retryAfter=none errorType=none providerCode=json_validate_failed limitSource=none error=GroqError errorCode=groq_generate_failed chain=GroqError",
+    ]);
+
+    await agent.close();
+  });
+
+  it("logs a Groq invalid JSON without status or error type", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw new GroqError(
+            "groq_generate_invalid_json",
+            "Model Groq mengembalikan JSON yang tidak valid.",
+          );
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.observe("Continue")).rejects.toMatchObject({
+      code: "agent_observe_failed",
+    });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=observe code=agent_observe_failed cause=unknown status=none retryAfter=none errorType=none providerCode=none limitSource=none error=GroqError errorCode=groq_generate_invalid_json chain=GroqError",
+    ]);
+    expect(warnings[0]).not.toContain("Model Groq mengembalikan JSON");
+
+    await agent.close();
+  });
+
+  it("logs a Groq unsupported message without the raw message", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw new GroqError(
+            "groq_generate_unsupported_message",
+            "raw unsupported message payload",
+          );
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.observe("Continue")).rejects.toMatchObject({
+      code: "agent_observe_failed",
+    });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=observe code=agent_observe_failed cause=unknown status=none retryAfter=none errorType=none providerCode=none limitSource=none error=GroqError errorCode=groq_generate_unsupported_message chain=GroqError",
+    ]);
+    expect(warnings[0]).not.toContain("raw unsupported message payload");
+
+    await agent.close();
+  });
+
+  it("reads Groq metadata through a wrapped error cause", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async act() {
+          throw wrappedFailure({
+            cause: new GroqError("groq_generate_failed", "Panggilan model Groq gagal.", {
+              httpStatus: 400,
+              retryAfterSeconds: 12,
+              errorType: "invalid_request_error",
+              providerCode: "json_validate_failed",
+              limitSource: "groq_json_schema",
+            }),
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.act("Continue")).rejects.toMatchObject({
+      code: "agent_act_failed",
+    });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=act code=agent_act_failed cause=unknown status=400 retryAfter=12 errorType=invalid_request_error providerCode=json_validate_failed limitSource=groq_json_schema error=StagehandError errorCode=groq_generate_failed chain=StagehandError>GroqError",
+    ]);
+
+    await agent.close();
+  });
+
+  it("logs none for an error without provider metadata", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async snapshot() {
+          throw new Error("plain failure");
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.snapshot()).rejects.toMatchObject({
+      code: "agent_snapshot_failed",
+    });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=snapshot code=agent_snapshot_failed cause=unknown status=none retryAfter=none errorType=none providerCode=none limitSource=none error=Error errorCode=none chain=Error",
+    ]);
+
+    await agent.close();
+  });
+
+  it("drops metadata values that do not match the sanitization pattern", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw new GroqError("groq_generate_failed", "raw-provider-message", {
+            httpStatus: 400,
+            errorType: "<script>alert(1)</script>",
+            providerCode: "bad value with spaces",
+            limitSource: "openrouter_credits\nleak",
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.observe("Continue")).rejects.toMatchObject({
+      code: "agent_observe_failed",
+    });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=observe code=agent_observe_failed cause=unknown status=400 retryAfter=none errorType=none providerCode=none limitSource=none error=GroqError errorCode=groq_generate_failed chain=GroqError",
+    ]);
+    expect(warnings[0]).not.toContain("<script>");
+    expect(warnings[0]).not.toContain("bad value");
+    expect(warnings[0]).not.toContain("leak");
+
+    await agent.close();
+  });
+
+  it("logs a ZodError class without an error code", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async extractStructured() {
+          throw new z.ZodError([]);
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(
+      agent.extractStructured("Verify the step", z.strictObject({ stepOk: z.boolean() })),
+    ).rejects.toMatchObject({ code: "agent_extract_failed" });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=extract code=agent_extract_failed cause=unknown status=none retryAfter=none errorType=none providerCode=none limitSource=none error=ZodError errorCode=none chain=ZodError",
+    ]);
+
+    await agent.close();
+  });
+
+  it("drops an error code that does not match the sanitization pattern", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async snapshot() {
+          throw Object.assign(new Error("bad code failure"), {
+            code: "bad code with spaces",
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.snapshot()).rejects.toMatchObject({
+      code: "agent_snapshot_failed",
+    });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=snapshot code=agent_snapshot_failed cause=unknown status=none retryAfter=none errorType=none providerCode=none limitSource=none error=Error errorCode=none chain=Error",
+    ]);
+    expect(warnings[0]).not.toContain("bad code with spaces");
+
+    await agent.close();
+  });
+
+  it("never logs the raw error message or API key", async () => {
+    const warnings = captureWarnings();
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async extract() {
+          throw new Error(`raw error message ${FAKE_API_KEY}`);
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    await expect(agent.extractText("Read the heading")).rejects.toMatchObject({
+      code: "agent_extract_failed",
+    });
+
+    expect(warnings).toEqual([
+      "Agent operation failed: op=extract code=agent_extract_failed cause=unknown status=none retryAfter=none errorType=none providerCode=none limitSource=none error=Error errorCode=none chain=Error",
+    ]);
+    expect(warnings[0]).not.toContain("raw error message");
+    expect(warnings[0]).not.toContain(FAKE_API_KEY);
 
     await agent.close();
   });
