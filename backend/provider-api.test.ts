@@ -320,6 +320,43 @@ describe("PUT /v1/providers", () => {
     });
   });
 
+  it("stores Groq after the existing providers in enum order", async () => {
+    const { app, providers } = createHarness(configured);
+    await app.request(
+      "/v1/providers",
+      jsonBody("PUT", {
+        provider: "openrouter",
+        model: "nvidia/nemotron-3.5-super-vl:free",
+        apiKey,
+      }),
+    );
+    const response = await app.request(
+      "/v1/providers",
+      jsonBody("PUT", {
+        provider: "groq",
+        model: "qwen/qwen3.8-27b",
+        apiKey,
+      }),
+    );
+    const body = (await response.json()) as { data: ProviderConfig };
+
+    expect(response.status).toBe(200);
+    expect(body.data).toEqual({
+      provider: "groq",
+      model: "qwen/qwen3.8-27b",
+      configured: true,
+      updatedAt: fixedNow,
+      available: ["gemini", "openrouter", "groq"],
+      keys: [],
+    });
+    expect(JSON.stringify(body)).not.toContain(apiKey);
+    expect(providers.setConfig).toHaveBeenLastCalledWith({
+      provider: "groq",
+      model: "qwen/qwen3.8-27b",
+      apiKey,
+    });
+  });
+
   it("reactivates a stored provider without an apiKey", async () => {
     const { app, providers } = createHarness(configured);
     const response = await app.request(

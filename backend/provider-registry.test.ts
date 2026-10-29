@@ -179,6 +179,32 @@ describe("provider registry", () => {
     expect(validateOpenRouter).not.toHaveBeenCalled();
   });
 
+  it("registers Groq as a client adapter and keeps unknown providers null", () => {
+    const validateGroq = vi.fn(
+      async (): Promise<ProviderValidation> => ({ ok: true }),
+    );
+    const registry = createProviderRegistry({
+      validateGemini: async () => ({ ok: true }),
+      validateOpenRouter: async () => ({ ok: true }),
+      validateGroq,
+    });
+    const groq = registry.get("groq");
+
+    expect(groq?.id).toBe("groq");
+    const modelConfig = groq?.createModelConfig({
+      model: "qwen/qwen3.8-27b",
+      apiKey,
+    });
+    expect(modelConfig?.kind).toBe("client");
+    if (modelConfig?.kind !== "client") {
+      throw new Error("Expected a Groq client model config.");
+    }
+    expect(typeof modelConfig.generate).toBe("function");
+
+    expect(registry.get("openai")).toBeNull();
+    expect(validateGroq).not.toHaveBeenCalled();
+  });
+
   it("uses the injected validators instead of the network", async () => {
     const validateGemini = vi.fn(
       async (): Promise<ProviderValidation> => ({ ok: false, message: "Ditolak." }),

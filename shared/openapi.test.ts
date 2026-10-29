@@ -370,6 +370,9 @@ describe("OpenAPI document", () => {
     ]);
     expect(requiredOf(request)).toEqual(["provider", "model"]);
     expect(requiredOf(schemas.ProviderConfig)).toContain("available");
+    expect(JSON.stringify(schemas.ProviderConfig)).toContain(
+      '["gemini","openrouter","groq"]',
+    );
 
     const operation = operationAt("put", "/providers");
 

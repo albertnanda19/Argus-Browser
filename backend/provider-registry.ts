@@ -1,6 +1,11 @@
 import type { ProviderId } from "../shared/provider";
 import { validateGeminiCredentials, type GeminiValidator } from "./gemini-provider";
 import {
+  createGroqGenerate,
+  validateGroqCredentials,
+  type GroqValidator,
+} from "./groq-provider";
+import {
   createOpenRouterGenerate,
   validateOpenRouterCredentials,
   type OpenRouterValidator,
@@ -31,6 +36,7 @@ export type ProviderRegistry = {
 export type ProviderRegistryOptions = {
   readonly validateGemini?: GeminiValidator;
   readonly validateOpenRouter?: OpenRouterValidator;
+  readonly validateGroq?: GroqValidator;
 };
 
 export function createProviderRegistry(
@@ -39,6 +45,7 @@ export function createProviderRegistry(
   const validateGemini = options.validateGemini ?? validateGeminiCredentials;
   const validateOpenRouter =
     options.validateOpenRouter ?? validateOpenRouterCredentials;
+  const validateGroq = options.validateGroq ?? validateGroqCredentials;
   const adapters = new Map<string, ProviderAdapter>([
     [
       "gemini",
@@ -61,6 +68,17 @@ export function createProviderRegistry(
           generate: createOpenRouterGenerate({ model, apiKey }),
         }),
         validateCredentials: validateOpenRouter,
+      },
+    ],
+    [
+      "groq",
+      {
+        id: "groq",
+        createModelConfig: ({ model, apiKey }) => ({
+          kind: "client",
+          generate: createGroqGenerate({ model, apiKey }),
+        }),
+        validateCredentials: validateGroq,
       },
     ],
   ]);

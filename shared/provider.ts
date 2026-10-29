@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const providerIdSchema = z.enum(["gemini", "openrouter"]);
+export const providerIdSchema = z.enum(["gemini", "openrouter", "groq"]);
 
 export type ProviderId = z.infer<typeof providerIdSchema>;
 

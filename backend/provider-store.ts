@@ -33,6 +33,7 @@ export const storedProviderFileSchema = z
     configs: z.strictObject({
       gemini: storedProviderEntrySchema.optional(),
       openrouter: storedProviderEntrySchema.optional(),
+      groq: storedProviderEntrySchema.optional(),
     }),
   })
   .superRefine((value, context) => {
@@ -52,6 +53,7 @@ const legacyStoredProviderFileSchema = z.strictObject({
   configs: z.strictObject({
     gemini: legacyStoredProviderEntrySchema.optional(),
     openrouter: legacyStoredProviderEntrySchema.optional(),
+    groq: legacyStoredProviderEntrySchema.optional(),
   }),
 });
 
@@ -104,6 +106,7 @@ function migrateLegacyFile(config: {
   readonly configs: {
     readonly gemini?: LegacyStoredProviderEntry;
     readonly openrouter?: LegacyStoredProviderEntry;
+    readonly groq?: LegacyStoredProviderEntry;
   };
 }): StoredProviderFile | null {
   const configs: StoredProviderFile["configs"] = {};

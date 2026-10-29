@@ -676,6 +676,19 @@ describe("createArgusClient", () => {
     ]);
   });
 
+  it("accepts Groq as the third provider in enum order", async () => {
+    const groqConfig: ProviderConfig = {
+      ...providerConfig,
+      provider: "groq",
+      model: "qwen/qwen3.8-27b",
+      available: ["gemini", "openrouter", "groq"],
+    };
+    const stub = createFetchStub(() => jsonResponse({ data: groqConfig }));
+    const client = createClient(stub.fetch);
+
+    await expect(client.providers.get()).resolves.toEqual(groqConfig);
+  });
+
   it("allows reactivating a stored provider without an API key", async () => {
     const stub = createFetchStub(() => jsonResponse({ data: providerConfig }));
     const client = createClient(stub.fetch);

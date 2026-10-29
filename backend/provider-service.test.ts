@@ -21,8 +21,10 @@ const later = new Date("2026-10-26T10:00:00.000Z");
 const apiKey = "unit-test-secret-key-001";
 const secondApiKey = "unit-test-secret-key-002";
 const openRouterKey = "unit-test-openrouter-key";
+const groqKey = "unit-test-groq-key";
 const model = "gemini-2.5-flash";
 const openRouterModel = "nvidia/nemotron-3.5-super-vl:free";
+const groqModel = "qwen/qwen3.8-27b";
 
 function newAppDataDir(): string {
   return join(testRoot, `appdata-${randomBytes(4).toString("hex")}`);
@@ -44,10 +46,12 @@ type Validator = (
 function registryWith(options: {
   readonly gemini?: Validator;
   readonly openrouter?: Validator;
+  readonly groq?: Validator;
 } = {}) {
   return createProviderRegistry({
     validateGemini: options.gemini ?? (async () => ({ ok: true })),
     validateOpenRouter: options.openrouter ?? (async () => ({ ok: true })),
+    validateGroq: options.groq ?? (async () => ({ ok: true })),
   });
 }
 
@@ -225,6 +229,65 @@ describe("provider configuration service", () => {
         openrouter: {
           model: openRouterModel,
           apiKeys: [openRouterKey],
+          updatedAt: fixedNow.toISOString(),
+        },
+      },
+    });
+  });
+
+  it("stores Groq with the models validator and preserves the other providers", async () => {
+    const appDataDir = newAppDataDir();
+    const validateGroq = vi.fn<Validator>(async () => ({ ok: true }));
+    const service = await createProviderService({
+      appDataDir,
+      registry: registryWith({ groq: validateGroq }),
+      now: () => fixedNow,
+    });
+
+    await service.setConfig({ provider: "gemini", model, apiKey });
+    await service.setConfig({
+      provider: "openrouter",
+      model: openRouterModel,
+      apiKey: openRouterKey,
+    });
+    const config = await service.setConfig({
+      provider: "groq",
+      model: groqModel,
+      apiKeys: [groqKey],
+    });
+
+    expect(validateGroq).toHaveBeenCalledWith({
+      model: groqModel,
+      apiKey: groqKey,
+    });
+    expect(config).toEqual({
+      provider: "groq",
+      model: groqModel,
+      configured: true,
+      updatedAt: fixedNow.toISOString(),
+      available: ["gemini", "openrouter", "groq"],
+      keys: readyKeys(groqKey),
+    });
+    expect(service.getActive()).toEqual({
+      provider: "groq",
+      model: groqModel,
+      apiKeys: [groqKey],
+      updatedAt: fixedNow.toISOString(),
+    });
+
+    const contents: unknown = JSON.parse(await readFile(providerFile(appDataDir), "utf8"));
+    expect(contents).toEqual({
+      active: "groq",
+      configs: {
+        gemini: { model, apiKeys: [apiKey], updatedAt: fixedNow.toISOString() },
+        openrouter: {
+          model: openRouterModel,
+          apiKeys: [openRouterKey],
+          updatedAt: fixedNow.toISOString(),
+        },
+        groq: {
+          model: groqModel,
+          apiKeys: [groqKey],
           updatedAt: fixedNow.toISOString(),
         },
       },

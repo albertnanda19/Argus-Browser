@@ -19,6 +19,7 @@ const testRoot = resolve(
 const updatedAt = "2026-10-25T10:00:00.000Z";
 const geminiKey = "unit-test-gemini-key";
 const openRouterKey = "unit-test-openrouter-key";
+const groqKey = "unit-test-groq-key";
 
 function newAppDataDir(): string {
   return join(testRoot, `appdata-${randomBytes(4).toString("hex")}`);
@@ -68,6 +69,31 @@ describe("provider store", () => {
       status: "ok",
       config: twoConfigs,
     });
+  });
+
+  it("reads and writes a Groq configuration next to the other providers", async () => {
+    const appDataDir = newAppDataDir();
+    const config: StoredProviderFile = {
+      active: "groq",
+      configs: {
+        ...twoConfigs.configs,
+        groq: {
+          model: "qwen/qwen3.8-27b",
+          apiKeys: [groqKey],
+          updatedAt,
+        },
+      },
+    };
+
+    await writeStoredProviderConfig(appDataDir, config);
+
+    await expect(readStoredProviderConfig(appDataDir)).resolves.toEqual({
+      status: "ok",
+      config,
+    });
+
+    const contents: unknown = JSON.parse(await readFile(providerFile(appDataDir), "utf8"));
+    expect(contents).toEqual(config);
   });
 
   it("migrates the legacy single-provider shape in memory", async () => {
