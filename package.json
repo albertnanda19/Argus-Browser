@@ -6,6 +6,7 @@
   "main": "dist/node/electron/main.js",
   "scripts": {
     "dev": "npm run build:node && node scripts/dev.mjs",
+    "providers:configure": "node scripts/configure-providers.mjs",
     "build": "npm run clean && npm run build:node && npm run build:renderer",
     "clean": "node scripts/clean.mjs",
     "build:node": "tsc -p tsconfig.node.json",
