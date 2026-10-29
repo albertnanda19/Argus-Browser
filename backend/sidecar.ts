@@ -30,7 +30,7 @@ import { createSessionManager } from "./session-manager";
 import { createTaskManager } from "./task-manager";
 import { createTaskRunner } from "./task-runner";
 
-const SHUTDOWN_TIMEOUT_MS = 9_000;
+const SHUTDOWN_TIMEOUT_MS = 8_000;
 
 function readApprovalTimeoutMs(): number | undefined {
   const raw = process.env.ARGUS_APPROVAL_TIMEOUT_MS;

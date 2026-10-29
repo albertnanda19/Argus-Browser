@@ -563,6 +563,29 @@ describe("unexpected close", () => {
 
     expect(warn).not.toHaveBeenCalled();
   });
+
+  it("resolves close after Chrome died and stays idempotent", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const context = createFakeContext();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const manager = createManager(appDataDir, {
+      launchBrowser: createFakeLauncher([context]).launchBrowser,
+    });
+    const session = await manager.start(profile.id);
+
+    context.emitClose();
+    expect(manager.get(session.id)?.status).toBe("closed");
+
+    const first = await manager.close(session.id);
+    const second = await manager.close(session.id);
+
+    expect(first.status).toBe("closed");
+    expect(second).toEqual(first);
+    expect(context.closeCalls).toBe(0);
+    expect(manager.getCdpCredentials(session.id)).toBeNull();
+    expect(manager.getCdpUrl(session.id)).toBeNull();
+  });
 });
 
 describe("shutdown", () => {

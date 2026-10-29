@@ -15,6 +15,9 @@ function createFakeRouter() {
   let sink: CdpClientSink | null = null;
   const send = vi.fn<(message: CdpWireMessage) => void>();
   const close = vi.fn(async () => undefined);
+  const rejectPending = vi.fn<(message: string) => void>((message) => {
+    sink?.send({ id: 900, error: { code: -32000, message } });
+  });
   const routerClose = vi.fn(async () => undefined);
   let nextClient = 1;
 
@@ -24,6 +27,7 @@ function createFakeRouter() {
       const client: CdpRouterClient = {
         id: `c_${nextClient++}`,
         send,
+        rejectPending,
         close,
       };
       return client;
@@ -37,6 +41,7 @@ function createFakeRouter() {
     router,
     send,
     close,
+    rejectPending,
     routerClose,
     get sink() {
       if (sink === null) {
@@ -289,6 +294,27 @@ describe("startCdpGateway", () => {
     expect(socket.readyState).toBe(WebSocket.CLOSED);
     expect(fake.close).toHaveBeenCalled();
     await gateway.close();
+  });
+
+  it("rejects pending requests with a clear error and closes the listener", async () => {
+    const fake = createFakeRouter();
+    const gateway = await startGateway(fake.router);
+    const socket = await waitForOpen(
+      `ws://127.0.0.1:${gateway.port}/devtools/browser/test`,
+      { headers: { Authorization: `Bearer ${API_TOKEN}` } },
+    );
+    const messagePromise = waitForMessage(socket);
+
+    await gateway.close();
+
+    expect(fake.rejectPending).toHaveBeenCalledWith("CDP gateway closed.");
+    expect(await messagePromise).toEqual({
+      id: 900,
+      error: { code: -32000, message: "CDP gateway closed." },
+    });
+    await waitForClose(socket);
+    await expect(fetch(`${gateway.httpUrl}/json/version`)).rejects.toThrow();
+    await expect(gateway.close()).resolves.toBeUndefined();
   });
 
   it("does not reflect tokens in unknown route errors", async () => {

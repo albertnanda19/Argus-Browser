@@ -1,12 +1,18 @@
 import { randomBytes } from "node:crypto";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
 import type { Session, SessionStatus } from "../shared/session";
-import { launchBrowser, type BrowserSessionContext, type CdpCredentials, type LaunchBrowser } from "./browser-launcher";
+import {
+  CLOSE_BUDGET_MS,
+  launchBrowser,
+  type BrowserSessionContext,
+  type CdpCredentials,
+  type LaunchBrowser,
+} from "./browser-launcher";
 import { getProfile, ProfileStoreError, resolveProfileDir, updateLastUsedAt } from "./profile-store";
 import { SessionError } from "./session-errors";
 
-const CLOSE_TIMEOUT_MS = 8_000;
-const SHUTDOWN_TIMEOUT_MS = 8_000;
+const CLOSE_TIMEOUT_MS = CLOSE_BUDGET_MS;
+const SHUTDOWN_TIMEOUT_MS = CLOSE_BUDGET_MS;
 
 const ACTIVE_STATUSES = new Set<SessionStatus>(["starting", "ready", "busy", "closing"]);
 

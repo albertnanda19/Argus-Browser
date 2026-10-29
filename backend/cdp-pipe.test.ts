@@ -173,6 +173,43 @@ describe("createCdpPipeTransport", () => {
     expect(harness.writtenMessages()).toEqual([{ id: 0, method: "Browser.close" }]);
   });
 
+  it("keeps Browser.close, SIGTERM, and SIGKILL inside the configured budget", async () => {
+    const timeouts: number[] = [];
+    const harness = createHarness({
+      browserCloseTimeoutMs: 100,
+      terminateTimeoutMs: 50,
+      killTimeoutMs: 50,
+      async waitForExit(timeoutMs) {
+        timeouts.push(timeoutMs);
+        return false;
+      },
+    });
+
+    await harness.pipe.close();
+
+    expect(harness.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(timeouts).toHaveLength(3);
+    expect(timeouts[0]).toBeLessThanOrEqual(100);
+    expect(timeouts[1]).toBeLessThanOrEqual(50);
+    expect(timeouts[2]).toBeLessThanOrEqual(50);
+    expect(timeouts.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(200);
+  });
+
+  it("does not send Browser.close after a pipe EOF", async () => {
+    const harness = createHarness({
+      async waitForExit() {
+        return true;
+      },
+    });
+    harness.read.end();
+    await new Promise<void>((resolveTick) => setImmediate(resolveTick));
+
+    await harness.pipe.close();
+
+    expect(harness.writtenMessages()).toEqual([]);
+    expect(harness.signals).toEqual([]);
+  });
+
   it("rejects a Chrome executable that cannot be spawned", async () => {
     await expect(
       launchCdpPipe({

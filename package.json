@@ -17,7 +17,8 @@
     "smoke:act": "npm run build:node && node dist/node/backend/scripts/smoke-act.js",
     "smoke:input": "npm run build:node && node dist/node/backend/scripts/smoke-input.js",
     "smoke:stealth": "npm run build:node && node dist/node/backend/scripts/smoke-stealth.js",
-    "smoke:cdp-gateway": "npm run build:node && node dist/node/backend/scripts/smoke-cdp-gateway.js"
+    "smoke:cdp-gateway": "npm run build:node && node dist/node/backend/scripts/smoke-cdp-gateway.js",
+    "smoke:cdp-lifecycle": "npm run build:node && node dist/node/backend/scripts/smoke-cdp-lifecycle.js"
   },
   "dependencies": {
     "@browserbasehq/stagehand": "4.3.0",

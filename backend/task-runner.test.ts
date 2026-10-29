@@ -273,6 +273,7 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
   let currentUrl = options.initialUrl ?? pageUrl;
   let pages: BrowserPage[] = [];
   const gotoCalls: Array<{ readonly url: string; readonly timeout: number }> = [];
+  let contextCloseCalls = 0;
 
   const page: BrowserPage = {
     goto: async (url, gotoOptions) => {
@@ -291,7 +292,9 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
   };
   pages = [page];
   const context: BrowserSessionContext = {
-    close: async () => undefined,
+    close: async () => {
+      contextCloseCalls += 1;
+    },
     on: () => undefined,
     pages: () => pages,
     newPage: async () => {
@@ -350,6 +353,7 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
       pages = [];
     },
     gotoCalls,
+    contextCloseCalls: (): number => contextCloseCalls,
   };
 }
 
@@ -1583,6 +1587,41 @@ describe("task runner", () => {
     expect(
       harness.events.list().some(({ event }) => event.type === "task.completed"),
     ).toBe(false);
+  });
+
+  it("cancels a running task without closing the session or the browser", async () => {
+    let announceObserve: () => void = () => undefined;
+    const observeStarted = new Promise<void>((resolve) => {
+      announceObserve = resolve;
+    });
+    const fake = createFakeAgent({
+      observe: async () => {
+        announceObserve();
+        return await new Promise<readonly AgentAction[]>(() => undefined);
+      },
+    });
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(observeStarted);
+
+    harness.tasks.cancelTask(task.id);
+    harness.runner.cancel(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.cancelled");
+    expect(harness.tasks.getTask(task.id)?.status).toBe("cancelled");
+    expect(harness.sessions.get(readySessionId)?.status).toBe("ready");
+    expect(harness.sessions.getCdpUrl(readySessionId)).not.toBeNull();
+    expect(harness.sessions.getCdpCredentials(readySessionId)).not.toBeNull();
+    expect(harness.sessions.contextCloseCalls()).toBe(0);
+    await vi.waitFor(() => {
+      expect(fake.state.closed).toBe(true);
+    });
   });
 
   it("cancels active tasks and closes agents on shutdown", async () => {

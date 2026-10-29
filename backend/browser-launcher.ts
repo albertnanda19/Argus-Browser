@@ -27,14 +27,37 @@ import {
 } from "./cdp-gateway";
 
 const CONNECT_TIMEOUT_MS = 30_000;
-const BROWSER_EXIT_TIMEOUT_MS = 2_000;
-const CONTEXT_CLOSE_TIMEOUT_MS = 2_000;
-const HARDENING_CLOSE_TIMEOUT_MS = 1_000;
-const CLIENT_CLOSE_TIMEOUT_MS = 1_000;
-const BROWSER_CLOSE_TIMEOUT_MS = 1_000;
-const ROUTER_CLOSE_TIMEOUT_MS = 3_000;
-const GATEWAY_CLOSE_TIMEOUT_MS = 1_000;
-const PIPE_CLOSE_TIMEOUT_MS = 1_000;
+
+export const CLOSE_BUDGET_MS = 8_000;
+export const CLOSE_STEP_TIMEOUTS_MS = {
+  context: 1_000,
+  hardening: 400,
+  hardeningClient: 200,
+  playwrightClient: 200,
+  browser: 400,
+  router: 2_700,
+  gateway: 600,
+  pipe: 300,
+} as const;
+export const CDP_CLOSE_TIMEOUTS_MS = {
+  browserClose: 1_500,
+  terminate: 500,
+  kill: 500,
+} as const;
+
+export function closeBudgetTotalMs(): number {
+  return Object.values(CLOSE_STEP_TIMEOUTS_MS).reduce(
+    (total, timeoutMs) => total + timeoutMs,
+    0,
+  );
+}
+
+export function cdpCloseBudgetTotalMs(): number {
+  return Object.values(CDP_CLOSE_TIMEOUTS_MS).reduce(
+    (total, timeoutMs) => total + timeoutMs,
+    0,
+  );
+}
 
 export type BrowserLocator = {
   click(options: { readonly timeout: number }): Promise<void>;
@@ -317,13 +340,13 @@ function createManagedContext(
     close() {
       closePromise ??= (async () => {
         try {
-          await withTimeout(context.close(), CONTEXT_CLOSE_TIMEOUT_MS);
+          await withTimeout(context.close(), CLOSE_STEP_TIMEOUTS_MS.context);
         } catch (error) {
           console.warn(
             `Browser context close failed: ${error instanceof Error ? error.name : "unknown"}`,
           );
         } finally {
-          await cleanup();
+          await closeWithTimeout(cleanup(), closeBudgetTotalMs() + 250);
           notifyClose();
         }
       })();
@@ -360,7 +383,9 @@ export async function launchBrowserWithDependencies(
     executablePath: options.executablePath,
     userDataDir: options.userDataDir,
     args: createCdpLaunchArguments(),
-    browserCloseTimeoutMs: BROWSER_EXIT_TIMEOUT_MS,
+    browserCloseTimeoutMs: CDP_CLOSE_TIMEOUTS_MS.browserClose,
+    terminateTimeoutMs: CDP_CLOSE_TIMEOUTS_MS.terminate,
+    killTimeoutMs: CDP_CLOSE_TIMEOUTS_MS.kill,
   });
   const router = createCdpRouter(pipe);
   const bearerToken = randomBytes(32).toString("base64url");
@@ -377,18 +402,18 @@ export async function launchBrowserWithDependencies(
 
   const cleanup = (): Promise<void> => {
     cleanupPromise ??= (async () => {
-      await closeWithTimeout(hardening?.close(), HARDENING_CLOSE_TIMEOUT_MS);
+      await closeWithTimeout(hardening?.close(), CLOSE_STEP_TIMEOUTS_MS.hardening);
       hardening = null;
-      await closeWithTimeout(hardeningClient?.close(), CLIENT_CLOSE_TIMEOUT_MS);
+      await closeWithTimeout(hardeningClient?.close(), CLOSE_STEP_TIMEOUTS_MS.hardeningClient);
       hardeningClient = null;
-      await closeWithTimeout(playwrightClient?.close(), CLIENT_CLOSE_TIMEOUT_MS);
+      await closeWithTimeout(playwrightClient?.close(), CLOSE_STEP_TIMEOUTS_MS.playwrightClient);
       playwrightClient = null;
-      await closeWithTimeout(browser?.close(), BROWSER_CLOSE_TIMEOUT_MS);
+      await closeWithTimeout(browser?.close(), CLOSE_STEP_TIMEOUTS_MS.browser);
       browser = null;
-      await closeWithTimeout(router.close(), ROUTER_CLOSE_TIMEOUT_MS);
-      await closeWithTimeout(gateway?.close(), GATEWAY_CLOSE_TIMEOUT_MS);
+      await closeWithTimeout(gateway?.close(), CLOSE_STEP_TIMEOUTS_MS.gateway);
       gateway = null;
-      await closeWithTimeout(pipe.close(), PIPE_CLOSE_TIMEOUT_MS);
+      await closeWithTimeout(router.close(), CLOSE_STEP_TIMEOUTS_MS.router);
+      await closeWithTimeout(pipe.close(), CLOSE_STEP_TIMEOUTS_MS.pipe);
     })();
     return cleanupPromise;
   };

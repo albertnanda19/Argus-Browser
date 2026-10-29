@@ -259,6 +259,25 @@ describe("createCdpRouter", () => {
     expect(a.messages).toHaveLength(1);
   });
 
+  it("rejects pending requests before a client closes", async () => {
+    const pipe = createFakePipe();
+    const router = createCdpRouter(pipe.pipe);
+    const a = createSink();
+    const client = await addClient(router, pipe, a.sink, "browser-a");
+
+    client.send({ id: 41, method: "Target.getTargets", params: {} });
+    client.rejectPending("CDP gateway closed.");
+    await flush();
+    await client.close();
+
+    expect(a.messages).toEqual([
+      { id: 41, error: { code: -32000, message: "CDP gateway closed." } },
+    ]);
+    pipe.emit({ id: pipe.sent.at(-2)?.id, result: { targetInfos: [] } });
+    await flush();
+    expect(a.messages).toHaveLength(1);
+  });
+
   it("disconnects only the requested client and keeps the pipe open", async () => {
     const pipe = createFakePipe();
     const router = createCdpRouter(pipe.pipe);

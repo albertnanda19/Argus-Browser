@@ -50,10 +50,16 @@ export type CdpPipeLaunchOptions = {
   readonly args?: readonly string[];
   readonly env?: NodeJS.ProcessEnv;
   readonly browserCloseTimeoutMs?: number;
+  readonly terminateTimeoutMs?: number;
+  readonly killTimeoutMs?: number;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function remainingTimeout(deadline: number, requestedMs: number): number {
+  return Math.max(0, Math.min(requestedMs, deadline - performance.now()));
 }
 
 function isWireMessage(value: unknown): value is CdpWireMessage {
@@ -185,6 +191,12 @@ export function createCdpPipeTransport(options: CdpPipeTransportOptions): CdpPip
     close() {
       closePromise ??= (async () => {
         isClosing = true;
+        const deadline =
+          performance.now() +
+          browserCloseTimeoutMs +
+          terminateTimeoutMs +
+          killTimeoutMs;
+
         if (!isClosed) {
           try {
             writeFrame({ id: 0, method: "Browser.close" });
@@ -193,19 +205,19 @@ export function createCdpPipeTransport(options: CdpPipeTransportOptions): CdpPip
           }
         }
 
-        if (await options.waitForExit(browserCloseTimeoutMs)) {
+        if (await options.waitForExit(remainingTimeout(deadline, browserCloseTimeoutMs))) {
           notifyClose();
           return;
         }
 
         options.kill("SIGTERM");
-        if (await options.waitForExit(terminateTimeoutMs)) {
+        if (await options.waitForExit(remainingTimeout(deadline, terminateTimeoutMs))) {
           notifyClose();
           return;
         }
 
         options.kill("SIGKILL");
-        await options.waitForExit(killTimeoutMs);
+        await options.waitForExit(remainingTimeout(deadline, killTimeoutMs));
         notifyClose();
       })();
       return closePromise;
@@ -285,5 +297,7 @@ export async function launchCdpPipe(options: CdpPipeLaunchOptions): Promise<CdpP
         child.once("exit", onExit);
       }),
     browserCloseTimeoutMs: options.browserCloseTimeoutMs,
+    terminateTimeoutMs: options.terminateTimeoutMs,
+    killTimeoutMs: options.killTimeoutMs,
   });
 }

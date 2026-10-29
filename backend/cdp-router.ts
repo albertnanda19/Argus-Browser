@@ -27,6 +27,7 @@ export type CdpClientSink = {
 export type CdpRouterClient = {
   readonly id: string;
   send(message: CdpWireMessage): void;
+  rejectPending(message: string): void;
   close(): Promise<void>;
 };
 
@@ -394,6 +395,23 @@ export function createCdpRouter(
       }
     });
 
+  const rejectPendingForClient = (client: ClientState, message: string): void => {
+    for (const [pipeId, entry] of pending) {
+      if (
+        entry.kind !== "client" ||
+        entry.clientId !== client.id ||
+        entry.clientRequestId === null
+      ) {
+        continue;
+      }
+      clearTimeout(entry.timer);
+      pending.delete(pipeId);
+      try {
+        client.sink.send(errorResponse(entry.clientRequestId, -32000, message));
+      } catch {}
+    }
+  };
+
   const router: CdpRouter = {
     pid: transport.pid,
     async addClient(sink) {
@@ -495,6 +513,9 @@ export function createCdpRouter(
             pending.delete(pipeId);
             enqueue(client, errorResponse(requestId, -32000, "CDP request failed."));
           }
+        },
+        rejectPending(message) {
+          rejectPendingForClient(client, message);
         },
         close() {
           return closeClient(client, "client_closed");

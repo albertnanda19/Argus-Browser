@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CDP_CLOSE_TIMEOUTS_MS,
+  CLOSE_BUDGET_MS,
+  CLOSE_STEP_TIMEOUTS_MS,
+  cdpCloseBudgetTotalMs,
+  closeBudgetTotalMs,
   createCdpLaunchArguments,
   launchBrowserWithDependencies,
   type BrowserPage,
@@ -176,6 +181,7 @@ function createHarness(
   overrides: {
     readonly connectBrowser?: (transport: ConnectOverCDPTransport) => Promise<PlaywrightBrowser>;
     readonly startGateway?: (options: CdpGatewayOptions) => Promise<CdpGateway>;
+    readonly spawnChrome?: (options: CdpPipeLaunchOptions) => Promise<CdpPipe>;
     readonly installFingerprintHardening?: (
       options: FingerprintHardeningOptions,
       dependencies?: unknown,
@@ -219,6 +225,9 @@ function createHarness(
         {
           spawnChrome: async (options) => {
             spawnOptions.push(options);
+            if (overrides.spawnChrome !== undefined) {
+              return await overrides.spawnChrome(options);
+            }
             return pipe.pipe;
           },
           connectBrowser: async (transport) => {
@@ -275,6 +284,8 @@ describe("launchBrowserWithDependencies", () => {
         userDataDir: "/profile",
         args: createCdpLaunchArguments(),
         browserCloseTimeoutMs: expect.any(Number),
+        terminateTimeoutMs: expect.any(Number),
+        killTimeoutMs: expect.any(Number),
       },
     ]);
     const args = harness.spawnOptions[0]?.args ?? [];
@@ -342,8 +353,8 @@ describe("launchBrowserWithDependencies", () => {
     expect(harness.pipe.closeCalls()).toBeGreaterThanOrEqual(1);
     expect(harness.events.indexOf("context-close")).toBeGreaterThanOrEqual(0);
     expect(harness.events.indexOf("pipe-close")).toBeGreaterThanOrEqual(0);
-    expect(harness.events.indexOf("gateway-close")).toBeGreaterThan(
-      harness.events.indexOf("pipe-close"),
+    expect(harness.events.indexOf("pipe-close")).toBeGreaterThan(
+      harness.events.indexOf("gateway-close"),
     );
     expect(harness.events.indexOf("gateway-close")).toBeGreaterThan(
       harness.events.indexOf("context-close"),
@@ -393,5 +404,54 @@ describe("launchBrowserWithDependencies", () => {
       expect(closeEvents).toBe(1);
     });
     expect(harness.events).toContain("gateway-close");
+  });
+
+  it("keeps the whole close sequence inside the eight second budget", () => {
+    expect(closeBudgetTotalMs() + CLOSE_STEP_TIMEOUTS_MS.context).toBeLessThanOrEqual(
+      CLOSE_BUDGET_MS,
+    );
+    expect(cdpCloseBudgetTotalMs()).toBeLessThanOrEqual(
+      CLOSE_STEP_TIMEOUTS_MS.router + CLOSE_STEP_TIMEOUTS_MS.pipe,
+    );
+    expect(CDP_CLOSE_TIMEOUTS_MS).toEqual({
+      browserClose: 1_500,
+      terminate: 500,
+      kill: 500,
+    });
+    expect(CLOSE_BUDGET_MS).toBe(8_000);
+  });
+
+  it("resolves close inside the budget when the context and pipe never respond", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = createFakePipe();
+      let pipeCloseCalls = 0;
+      const hangingPipe: CdpPipe = {
+        ...fake.pipe,
+        close() {
+          pipeCloseCalls += 1;
+          return new Promise<void>(() => undefined);
+        },
+      };
+      const harness = createHarness({
+        spawnChrome: async () => hangingPipe,
+      });
+      const result = await harness.launch();
+      let closeEvents = 0;
+      result.context.on("close", () => {
+        closeEvents += 1;
+      });
+
+      const closing = result.context.close();
+      await vi.advanceTimersByTimeAsync(CLOSE_BUDGET_MS);
+      await expect(closing).resolves.toBeUndefined();
+
+      expect(pipeCloseCalls).toBeGreaterThanOrEqual(1);
+      expect(closeEvents).toBe(1);
+      await expect(result.context.close()).resolves.toBeUndefined();
+      expect(closeEvents).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

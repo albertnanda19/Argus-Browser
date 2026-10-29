@@ -6,6 +6,9 @@ import type { CdpWireMessage } from "./cdp-pipe";
 import type { CdpRouter, CdpRouterClient } from "./cdp-router";
 
 const DEFAULT_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+const SOCKET_CLOSE_TIMEOUT_MS = 500;
+const WSS_CLOSE_TIMEOUT_MS = 500;
+const SERVER_CLOSE_TIMEOUT_MS = 500;
 
 export type CdpGatewayRouter = Pick<CdpRouter, "addClient">;
 
@@ -73,6 +76,40 @@ function rejectUpgrade(socket: Socket, status: number): void {
   );
 }
 
+function settleWithin(promise: Promise<void>, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolveSettle) => {
+    const timer = setTimeout(resolveSettle, timeoutMs);
+    timer.unref?.();
+    void promise.then(
+      () => {
+        clearTimeout(timer);
+        resolveSettle();
+      },
+      () => {
+        clearTimeout(timer);
+        resolveSettle();
+      },
+    );
+  });
+}
+
+function waitForSocketClose(socket: WebSocket, timeoutMs: number): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolveClose) => {
+    const timer = setTimeout(() => {
+      socket.terminate();
+      resolveClose();
+    }, timeoutMs);
+    timer.unref?.();
+    socket.once("close", () => {
+      clearTimeout(timer);
+      resolveClose();
+    });
+  });
+}
+
 function readMessage(data: RawData): string {
   if (typeof data === "string") {
     return data;
@@ -118,6 +155,7 @@ export async function startCdpGateway(options: CdpGatewayOptions): Promise<CdpGa
     maxPayload: 64 * 1024 * 1024,
   });
   const sockets = new Set<WebSocket>();
+  const routerClients = new Set<CdpRouterClient>();
   let isClosing = false;
   let closePromise: Promise<void> | null = null;
 
@@ -230,6 +268,7 @@ export async function startCdpGateway(options: CdpGatewayOptions): Promise<CdpGa
       }
       const current = client;
       client = null;
+      routerClients.delete(current);
       void current.close();
     };
 
@@ -277,6 +316,7 @@ export async function startCdpGateway(options: CdpGatewayOptions): Promise<CdpGa
           return;
         }
         client = attached;
+        routerClients.add(attached);
         webSocket.on("message", (data) => {
           let parsed: unknown;
           try {
@@ -338,18 +378,38 @@ export async function startCdpGateway(options: CdpGatewayOptions): Promise<CdpGa
     close() {
       closePromise ??= (async () => {
         isClosing = true;
+        for (const client of routerClients) {
+          try {
+            client.rejectPending("CDP gateway closed.");
+          } catch {}
+        }
+        const closingSockets = [...sockets].map((socket) => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.close(1001, "Gateway closing.");
+          } else if (socket.readyState === WebSocket.CONNECTING) {
+            socket.terminate();
+          }
+          return waitForSocketClose(socket, SOCKET_CLOSE_TIMEOUT_MS);
+        });
+        await Promise.all(closingSockets);
         for (const socket of sockets) {
-          socket.close(1001, "Gateway closing.");
           socket.terminate();
         }
-        await new Promise<void>((resolveClose) => {
-          wss.close(() => resolveClose());
-        });
         sockets.clear();
+        routerClients.clear();
+        await settleWithin(
+          new Promise<void>((resolveClose) => {
+            wss.close(() => resolveClose());
+          }),
+          WSS_CLOSE_TIMEOUT_MS,
+        );
         server.closeAllConnections();
-        await new Promise<void>((resolveClose) => {
-          server.close(() => resolveClose());
-        });
+        await settleWithin(
+          new Promise<void>((resolveClose) => {
+            server.close(() => resolveClose());
+          }),
+          SERVER_CLOSE_TIMEOUT_MS,
+        );
       })();
       return closePromise;
     },
