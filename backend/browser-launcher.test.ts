@@ -15,6 +15,7 @@ import type { CdpPipe, CdpPipeLaunchOptions, CdpWireMessage } from "./cdp-pipe";
 import type { CdpGateway, CdpGatewayOptions } from "./cdp-gateway";
 import type { FingerprintHardening, FingerprintHardeningOptions } from "./browser-stealth";
 import type { ConnectOverCDPTransport } from "playwright-core";
+import { capturePageThumbnail } from "./thumbnail";
 
 type FakePipe = {
   readonly pipe: CdpPipe;
@@ -186,6 +187,7 @@ function createHarness(
       options: FingerprintHardeningOptions,
       dependencies?: unknown,
     ) => Promise<FingerprintHardening>;
+    readonly newCDPSession?: (page: BrowserPage) => Promise<unknown>;
   } = {},
 ): Harness {
   const spawnOptions: CdpPipeLaunchOptions[] = [];
@@ -196,6 +198,9 @@ function createHarness(
   const pipe = createFakePipe();
   pipe.pipe.onClose(() => events.push("pipe-close"));
   const context = createFakeContext();
+  if (overrides.newCDPSession !== undefined) {
+    context.newCDPSession = overrides.newCDPSession;
+  }
   const browser = createFakeBrowser(context);
   const hardening = {
     close: vi.fn(async () => {
@@ -305,6 +310,61 @@ describe("launchBrowserWithDependencies", () => {
     expect(result.pid).toBe(4242);
     expect(harness.gatewayOptions).toHaveLength(1);
     expect(harness.gatewayOptions[0]?.router).toBeDefined();
+  });
+
+  it("forwards newCDPSession to the original context", async () => {
+    const session = { send: vi.fn(), detach: vi.fn() };
+    let receivedThis: unknown;
+    const newCDPSession = vi.fn(function (this: unknown) {
+      receivedThis = this;
+      return Promise.resolve(session);
+    });
+    const harness = createHarness({ newCDPSession });
+    const result = await harness.launch();
+    const page = result.context.pages()[0];
+    if (page === undefined) {
+      throw new Error("Fake page is missing.");
+    }
+    const forwarded = result.context.newCDPSession;
+    if (forwarded === undefined) {
+      throw new Error("newCDPSession was not forwarded.");
+    }
+
+    await expect(forwarded.call(result.context, page)).resolves.toBe(session);
+    expect(newCDPSession).toHaveBeenCalledWith(page);
+    expect(receivedThis).toBe(harness.browser.context);
+  });
+
+  it("does not add newCDPSession when the original context lacks it", async () => {
+    const harness = createHarness();
+    const result = await harness.launch();
+    const page = result.context.pages()[0];
+    if (page === undefined) {
+      throw new Error("Fake page is missing.");
+    }
+
+    expect(result.context).not.toHaveProperty("newCDPSession");
+    await expect(capturePageThumbnail({ context: result.context, page })).rejects.toThrow(
+      "CDP session is unavailable.",
+    );
+  });
+
+  it("rejects newCDPSession after the managed context closes", async () => {
+    const newCDPSession = vi.fn(() => new Promise<unknown>(() => undefined));
+    const harness = createHarness({ newCDPSession });
+    const result = await harness.launch();
+    const page = result.context.pages()[0];
+    if (page === undefined) {
+      throw new Error("Fake page is missing.");
+    }
+    await result.context.close();
+    const forwarded = result.context.newCDPSession;
+    if (forwarded === undefined) {
+      throw new Error("newCDPSession was not forwarded.");
+    }
+
+    await expect(forwarded(page)).rejects.toThrow("Browser context is closed.");
+    expect(newCDPSession).not.toHaveBeenCalled();
   });
 
   it("starts the gateway with a unique bearer token that never enters cdpUrl", async () => {

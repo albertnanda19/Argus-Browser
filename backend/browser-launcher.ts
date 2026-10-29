@@ -106,6 +106,7 @@ export type BrowserSessionContext = {
   newPage(): Promise<BrowserPage>;
   cookies?(url: string): Promise<BrowserCookie[]>;
   addCookies?(cookies: readonly BrowserCookieParam[]): Promise<void>;
+  newCDPSession?(page: BrowserPage): Promise<unknown>;
 };
 
 export type CdpCredentials = {
@@ -319,7 +320,9 @@ function createManagedContext(
   const listeners = new Set<() => void>();
   const cookies = context.cookies?.bind(context);
   const addCookies = context.addCookies?.bind(context);
+  const newCDPSession = context.newCDPSession?.bind(context);
   let isClosed = initiallyClosed;
+  let isClosing = false;
   let closePromise: Promise<void> | null = null;
 
   const notifyClose = (): void => {
@@ -333,11 +336,13 @@ function createManagedContext(
   };
 
   context.on("close", () => {
+    isClosing = true;
     void cleanup().finally(notifyClose);
   });
 
   const managedContext: BrowserSessionContext = {
     close() {
+      isClosing = true;
       closePromise ??= (async () => {
         try {
           await withTimeout(context.close(), CLOSE_STEP_TIMEOUTS_MS.context);
@@ -367,6 +372,16 @@ function createManagedContext(
     },
     ...(cookies === undefined ? {} : { cookies }),
     ...(addCookies === undefined ? {} : { addCookies }),
+    ...(newCDPSession === undefined
+      ? {}
+      : {
+          newCDPSession: (page: BrowserPage): Promise<unknown> => {
+            if (isClosed || isClosing) {
+              return Promise.reject(new Error("Browser context is closed."));
+            }
+            return newCDPSession(page);
+          },
+        }),
   };
 
   return { context: managedContext, notifyClose };
