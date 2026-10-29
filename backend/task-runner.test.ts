@@ -8,7 +8,7 @@ import type { Session } from "../shared/session";
 import type { Task } from "../shared/task";
 import { createApp } from "./app";
 import { createAgentStepStore, type AgentStepVerification } from "./agent-steps";
-import type { BrowserPage, BrowserSessionContext } from "./browser-launcher";
+import type { BrowserPage, BrowserSessionContext, CdpCredentials } from "./browser-launcher";
 import { createEventBus, type EventBus } from "./event-bus";
 import { createEventStreamRegistry } from "./event-stream";
 import type { RandomSource } from "./human-like";
@@ -254,6 +254,13 @@ function createTestPolicy(overrides: Partial<ProfilePolicy> = {}): ProfilePolicy
 
 const fixedRunnerNow = () => new Date(2026, 9, 26, 10, 0, 0);
 
+const runnerCredentials: CdpCredentials = {
+  gatewayUrl: "http://127.0.0.1:59876",
+  bearerToken: "runner-bearer-token",
+  extensionCdpUrl:
+    "ws://127.0.0.1:59876/devtools/browser/test?token=runner-capability-token",
+};
+
 type FakeSessionsOptions = {
   readonly initialUrl?: string;
   readonly goto?: (url: string) => Promise<void>;
@@ -262,6 +269,7 @@ type FakeSessionsOptions = {
 function createFakeSessions(options: FakeSessionsOptions = {}) {
   let isReady = true;
   let isContextAvailable = true;
+  let hasCredentials = true;
   let currentUrl = options.initialUrl ?? pageUrl;
   let pages: BrowserPage[] = [];
   const gotoCalls: Array<{ readonly url: string; readonly timeout: number }> = [];
@@ -309,6 +317,10 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
     },
     getCdpUrl: (sessionId: string): string | null =>
       sessionId === readySessionId && isReady ? "http://127.0.0.1:9222" : null,
+    getCdpCredentials: (sessionId: string): CdpCredentials | null =>
+      sessionId === readySessionId && isReady && hasCredentials
+        ? runnerCredentials
+        : null,
     getContext: (sessionId: string): BrowserSessionContext | null =>
       sessionId === readySessionId && isReady && isContextAvailable
         ? context
@@ -324,6 +336,9 @@ function createFakeSessions(options: FakeSessionsOptions = {}) {
     }),
     setReady(value: boolean): void {
       isReady = value;
+    },
+    setCredentialsAvailable(value: boolean): void {
+      hasCredentials = value;
     },
     setContextAvailable(value: boolean): void {
       isContextAvailable = value;
@@ -2412,6 +2427,53 @@ describe("task runner pre-navigation", () => {
     expect(event.type).toBe("task.completed");
     expect(sessions.gotoCalls).toEqual([{ url: goalUrl, timeout: 30_000 }]);
     expect(harness.steps.list(task.id)).toHaveLength(2);
+  });
+
+  it("passes the session CDP credentials to the agent factory", async () => {
+    let received: CdpCredentials | null = null;
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      createAgent: async (credentials) => {
+        received = credentials;
+        return fake.agent;
+      },
+    });
+    const task = createTask(harness.tasks, `Buka ${goalUrl}`);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(received).toEqual(runnerCredentials);
+  });
+
+  it("fails with a clear reason when ready credentials are unavailable", async () => {
+    const sessions = createFakeSessions();
+    sessions.setCredentialsAvailable(false);
+    let isAgentCreated = false;
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => {
+        isAgentCreated = true;
+        return fake.agent;
+      },
+    });
+    const task = createTask(harness.tasks, `Buka ${goalUrl}`);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Kredensial CDP sesi tidak tersedia.");
+      expect(event.reason).not.toContain("runner-bearer-token");
+      expect(event.reason).not.toContain("runner-capability-token");
+    }
+    expect(isAgentCreated).toBe(false);
+    expect(sessions.gotoCalls).toHaveLength(0);
   });
 
   it("fails when the session context is unavailable", async () => {

@@ -3,9 +3,9 @@ import { randomBytes } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { chromium, type BrowserContext } from "playwright-core";
 import type { ChromeInstallerState } from "../../shared/chrome-installer";
 import type { Profile } from "../../shared/profile";
+import { launchBrowser, type BrowserSessionContext } from "../browser-launcher";
 import { createChromeInstaller } from "../chrome-installer";
 import {
   createProfile,
@@ -19,7 +19,7 @@ const COOKIE_NAME = "argus_smoke";
 const COOKIE_URL = "https://example.com";
 const PROCESS_TIMEOUT_MS = 10_000;
 const PROCESS_POLL_MS = 100;
-const LAUNCH_TIMEOUT_MS = 30_000;
+const PAGE_TIMEOUT_MS = 10_000;
 
 type SmokeState = {
   appDataDir: string;
@@ -27,7 +27,8 @@ type SmokeState = {
   executablePath: string | null;
   profile: Profile | null;
   profileDir: string | null;
-  context: BrowserContext | null;
+  context: BrowserSessionContext | null;
+  pid: number | null;
   isProfileDeleted: boolean;
 };
 
@@ -158,15 +159,55 @@ async function ensureChrome(appDataDir: string): Promise<string> {
 async function launchHeaded(
   executablePath: string,
   profileDir: string,
-): Promise<BrowserContext> {
-  return chromium.launchPersistentContext(profileDir, {
-    executablePath,
-    headless: false,
-    timeout: LAUNCH_TIMEOUT_MS,
-    handleSIGINT: false,
-    handleSIGTERM: false,
-    handleSIGHUP: false,
-  });
+): Promise<{ readonly context: BrowserSessionContext; readonly pid: number }> {
+  const launched = await launchBrowser({ executablePath, userDataDir: profileDir });
+  return { context: launched.context, pid: launched.pid };
+}
+
+async function assertNoTcpCdp(pid: number): Promise<void> {
+  if (process.platform !== "darwin") {
+    console.log("no-listener check: SKIPPED (only available on macOS)");
+    return;
+  }
+
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync("lsof", [
+      "-nP",
+      "-a",
+      "-p",
+      String(pid),
+      "-iTCP",
+      "-sTCP:LISTEN",
+    ]));
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !("code" in error) ||
+      error.code !== 1
+    ) {
+      throw error;
+    }
+  }
+  if (stdout.trim().length > 0) {
+    throw new Error(`no-listener check: TCP listener found for pid ${pid}`);
+  }
+
+  const { stdout: command } = await execFileAsync("ps", [
+    "-ww",
+    "-p",
+    String(pid),
+    "-o",
+    "command=",
+  ]);
+  if (command.includes("--remote-debugging-port")) {
+    throw new Error("no-listener check: Chrome uses --remote-debugging-port");
+  }
+  if (command.includes("--remote-allow-origins")) {
+    throw new Error("no-listener check: Chrome uses --remote-allow-origins");
+  }
+
+  console.log(`no-listener check: PASS (pid ${pid}, no TCP CDP listener)`);
 }
 
 function findCookie(
@@ -211,12 +252,19 @@ async function runSteps(state: SmokeState): Promise<void> {
   console.log(`profile: ${state.profileDir}`);
 
   console.log("step 3: launch first headed context");
-  state.context = await launchHeaded(executablePath, state.profileDir);
+  const firstLaunch = await launchHeaded(executablePath, state.profileDir);
+  state.context = firstLaunch.context;
+  state.pid = firstLaunch.pid;
   await assertHeaded(state.profileDir);
+  await assertNoTcpCdp(firstLaunch.pid);
 
   const page = state.context.pages()[0] ?? (await state.context.newPage());
-  await page.goto("about:blank");
+  await page.goto("about:blank", { timeout: PAGE_TIMEOUT_MS });
   console.log(`page opened: ${page.url()}`);
+
+  if (state.context.addCookies === undefined || state.context.cookies === undefined) {
+    throw new Error("Browser context does not expose cookie access.");
+  }
 
   const cookieValue = randomBytes(8).toString("hex");
   const expires = Math.floor(Date.now() / 1000) + 3600;
@@ -244,10 +292,17 @@ async function runSteps(state: SmokeState): Promise<void> {
   console.log("step 4: close first context");
   await state.context.close();
   state.context = null;
+  state.pid = null;
   await waitForNoProcess(state.profileDir, "process check after first close");
 
   console.log("step 5: relaunch with the same profile");
-  state.context = await launchHeaded(executablePath, state.profileDir);
+  const secondLaunch = await launchHeaded(executablePath, state.profileDir);
+  state.context = secondLaunch.context;
+  state.pid = secondLaunch.pid;
+  await assertNoTcpCdp(secondLaunch.pid);
+  if (state.context.cookies === undefined) {
+    throw new Error("Browser context does not expose cookie access.");
+  }
   const after = findCookie(
     await state.context.cookies(COOKIE_URL),
     "after relaunch",
@@ -261,6 +316,7 @@ async function runSteps(state: SmokeState): Promise<void> {
   console.log("step 6: close second context");
   await state.context.close();
   state.context = null;
+  state.pid = null;
   await waitForNoProcess(state.profileDir, "process check after second close");
   await waitForNoProcess(executablePath, "executable process check");
 
@@ -345,6 +401,7 @@ async function run(): Promise<void> {
     profile: null,
     profileDir: null,
     context: null,
+    pid: null,
     isProfileDeleted: false,
   };
 

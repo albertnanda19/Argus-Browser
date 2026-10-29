@@ -362,7 +362,7 @@ async function runSteps(state: SmokeState): Promise<void> {
 
   const launched = await launchBrowser({ executablePath, userDataDir: profileDir });
   state.context = launched.context;
-  console.log("launch: PASS (CDP loopback ready)");
+  console.log("launch: PASS (CDP pipe gateway ready)");
 
   console.log("step 5: load the page before Stagehand is created");
   const page = await readActivePage(launched.context);
@@ -372,7 +372,7 @@ async function runSteps(state: SmokeState): Promise<void> {
 
   console.log("step 6: create the Stagehand adapter with the configured model");
   const agent = await createStagehandAgent({
-    cdpUrl: launched.cdpUrl,
+    credentials: launched.credentials,
     providers: createSmokeProviders(model, apiKey),
     registry: createProviderRegistry(),
   });

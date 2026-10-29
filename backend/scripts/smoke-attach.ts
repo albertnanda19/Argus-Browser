@@ -41,6 +41,7 @@ type SmokeState = {
   profileDir: string | null;
   context: BrowserSessionContext | null;
   agent: StagehandAgent | null;
+  pid: number | null;
   isProfileDeleted: boolean;
 };
 
@@ -134,6 +135,27 @@ async function waitForNoProcess(needle: string, label: string): Promise<void> {
   }
 }
 
+async function waitForProcessExit(pid: number, label: string): Promise<void> {
+  const deadline = Date.now() + PROCESS_TIMEOUT_MS;
+
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      console.log(`${label}: PASS (pid ${pid} exited)`);
+      return;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(`${label}: pid ${pid} is still running after ${PROCESS_TIMEOUT_MS} ms`);
+    }
+
+    await new Promise<void>((resolveDelay) => {
+      setTimeout(resolveDelay, PROCESS_POLL_MS);
+    });
+  }
+}
+
 async function resolveUserChrome(): Promise<string> {
   const appDataDir = resolveAppDataDir();
   console.log(`app data: ${appDataDir}`);
@@ -196,10 +218,11 @@ async function readActivePage(context: BrowserSessionContext): Promise<BrowserPa
 }
 
 async function assertChromeIsAlive(
-  cdpUrl: string,
+  credentials: { readonly gatewayUrl: string; readonly bearerToken: string },
   context: BrowserSessionContext,
 ): Promise<void> {
-  const response = await fetch(`${cdpUrl}/json/version`, {
+  const response = await fetch(`${credentials.gatewayUrl}/json/version`, {
+    headers: { Authorization: `Bearer ${credentials.bearerToken}` },
     signal: AbortSignal.timeout(CDP_PROBE_TIMEOUT_MS),
   });
   if (!response.ok) {
@@ -233,14 +256,15 @@ async function runSteps(state: SmokeState): Promise<void> {
   console.log(`profile: ${profileDir}`);
   console.log("profile: PASS");
 
-  console.log("step 3: launch Argus browser with CDP");
+  console.log("step 3: launch Argus browser with the CDP pipe gateway");
   const launched = await launchBrowser({ executablePath, userDataDir: profileDir });
   state.context = launched.context;
+  state.pid = launched.pid;
   console.log("launch: PASS");
 
   console.log("step 4: create the Stagehand adapter with a fake provider configuration");
   const agent = await createStagehandAgent({
-    cdpUrl: launched.cdpUrl,
+    credentials: launched.credentials,
     providers: createSmokeProviders(),
     registry: createProviderRegistry(),
   });
@@ -268,8 +292,8 @@ async function runSteps(state: SmokeState): Promise<void> {
   await agent.close();
   state.agent = null;
   console.log("adapter close: PASS");
-  await assertChromeIsAlive(launched.cdpUrl, launched.context);
-  console.log("chrome after adapter close: PASS (CDP responds, page still readable)");
+  await assertChromeIsAlive(launched.credentials, launched.context);
+  console.log("chrome after adapter close: PASS (gateway responds, page still readable)");
 }
 
 async function cleanup(state: SmokeState): Promise<unknown> {
@@ -329,9 +353,9 @@ async function cleanup(state: SmokeState): Promise<unknown> {
     record(error);
   }
 
-  if (state.executablePath !== null) {
+  if (state.pid !== null) {
     try {
-      await waitForNoProcess(state.executablePath, "final process check");
+      await waitForProcessExit(state.pid, "final process check");
     } catch (error) {
       record(error);
     }
@@ -353,6 +377,7 @@ async function run(): Promise<void> {
     profileDir: null,
     context: null,
     agent: null,
+    pid: null,
     isProfileDeleted: false,
   };
 

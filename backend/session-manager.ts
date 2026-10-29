@@ -1,11 +1,11 @@
 import { randomBytes } from "node:crypto";
 import type { ChromeInstallerState } from "../shared/chrome-installer";
 import type { Session, SessionStatus } from "../shared/session";
-import { launchBrowser, type BrowserSessionContext, type LaunchBrowser } from "./browser-launcher";
+import { launchBrowser, type BrowserSessionContext, type CdpCredentials, type LaunchBrowser } from "./browser-launcher";
 import { getProfile, ProfileStoreError, resolveProfileDir, updateLastUsedAt } from "./profile-store";
 import { SessionError } from "./session-errors";
 
-const CLOSE_TIMEOUT_MS = 5_000;
+const CLOSE_TIMEOUT_MS = 8_000;
 const SHUTDOWN_TIMEOUT_MS = 8_000;
 
 const ACTIVE_STATUSES = new Set<SessionStatus>(["starting", "ready", "busy", "closing"]);
@@ -28,6 +28,7 @@ export type SessionManager = {
   get(sessionId: string): Session | null;
   getContext(sessionId: string): BrowserSessionContext | null;
   getCdpUrl(sessionId: string): string | null;
+  getCdpCredentials(sessionId: string): CdpCredentials | null;
   close(sessionId: string): Promise<Session>;
   shutdown(): Promise<void>;
 };
@@ -36,6 +37,7 @@ type SessionRecord = {
   session: Session;
   context: BrowserSessionContext | null;
   cdpUrl: string | null;
+  credentials: CdpCredentials | null;
   startPromise: Promise<Session> | null;
   closePromise: Promise<Session> | null;
   isCloseRequested: boolean;
@@ -97,6 +99,7 @@ class SessionManagerImpl implements SessionManager {
       },
       context: null,
       cdpUrl: null,
+      credentials: null,
       startPromise: null,
       closePromise: null,
       isCloseRequested: false,
@@ -135,6 +138,18 @@ class SessionManagerImpl implements SessionManager {
       return null;
     }
     return record.cdpUrl;
+  }
+
+  getCdpCredentials(sessionId: string): CdpCredentials | null {
+    const record = this.sessions.get(sessionId);
+    if (
+      record === undefined ||
+      record.session.status !== "ready" ||
+      record.credentials === null
+    ) {
+      return null;
+    }
+    return { ...record.credentials };
   }
 
   async close(sessionId: string): Promise<Session> {
@@ -177,6 +192,7 @@ class SessionManagerImpl implements SessionManager {
       context = launched.context;
       record.context = launched.context;
       record.cdpUrl = launched.cdpUrl;
+      record.credentials = launched.credentials;
       context.on("close", () => this.handleContextClose(record));
       record.session = { ...record.session, status: "ready" };
 
@@ -196,6 +212,7 @@ class SessionManagerImpl implements SessionManager {
     }
 
     record.cdpUrl = null;
+    record.credentials = null;
 
     if (record.session.status === "closed" || record.session.status === "error") {
       return { ...record.session };
@@ -275,6 +292,7 @@ class SessionManagerImpl implements SessionManager {
 
   private failStart(record: SessionRecord, error: unknown): SessionError {
     record.cdpUrl = null;
+    record.credentials = null;
 
     if (record.session.status === "starting") {
       record.session = {
@@ -295,6 +313,7 @@ class SessionManagerImpl implements SessionManager {
   private handleContextClose(record: SessionRecord): void {
     record.context = null;
     record.cdpUrl = null;
+    record.credentials = null;
 
     if (
       record.isCloseRequested ||

@@ -1,5 +1,6 @@
 import type { ProviderRegistry } from "./provider-registry";
 import type { ProviderService } from "./provider-service";
+import type { CdpCredentials } from "./browser-launcher";
 import {
   createStagehandRuntime,
   type AgentActSummary,
@@ -391,7 +392,7 @@ export type StagehandAgent = {
 };
 
 export type CreateStagehandAgentOptions = {
-  readonly cdpUrl: string;
+  readonly credentials: CdpCredentials;
   readonly providers: ProviderService;
   readonly registry: ProviderRegistry;
   readonly createRuntime?: StagehandRuntimeFactory;
@@ -610,7 +611,7 @@ export async function createStagehandAgent(
   const createRuntime = options.createRuntime ?? createStagehandRuntime;
   const runtimePromise = runOperation(() =>
     createRuntime({
-      cdpUrl: options.cdpUrl,
+      credentials: options.credentials,
       model,
     }),
   );

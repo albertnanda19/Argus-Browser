@@ -19,7 +19,12 @@ import type {
   StagehandRuntimeOptions,
 } from "./stagehand-runtime";
 
-const FAKE_CDP_URL = "http://127.0.0.1:59876";
+const FAKE_CREDENTIALS = {
+  gatewayUrl: "http://127.0.0.1:59876",
+  bearerToken: "fake-agent-bearer",
+  extensionCdpUrl:
+    "ws://127.0.0.1:59876/devtools/browser/test?token=fake-agent-capability",
+};
 const FAKE_API_KEY = "fake-agent-key";
 const UPDATED_AT = "2026-10-25T10:00:00.000Z";
 
@@ -181,7 +186,7 @@ function createFixture(
     runtimeOptions,
     createAgent: () =>
       createStagehandAgent({
-        cdpUrl: FAKE_CDP_URL,
+        credentials: FAKE_CREDENTIALS,
         providers: createProviderService(options.getActive ?? (() => activeConfig())),
         registry: createRegistry(options.adapter === undefined ? geminiAdapter : options.adapter),
         createRuntime: runtimeFactory,
@@ -200,7 +205,7 @@ describe("createStagehandAgent", () => {
 
     await expect(
       createStagehandAgent({
-        cdpUrl: FAKE_CDP_URL,
+        credentials: FAKE_CREDENTIALS,
         providers: createProviderService(() => null),
         registry: createRegistry(geminiAdapter),
         createRuntime,
@@ -221,7 +226,7 @@ describe("createStagehandAgent", () => {
 
     await expect(
       createStagehandAgent({
-        cdpUrl: FAKE_CDP_URL,
+        credentials: FAKE_CREDENTIALS,
         providers: createProviderService(() => activeConfig()),
         registry: createRegistry(null),
         createRuntime,
@@ -243,7 +248,7 @@ describe("createStagehandAgent", () => {
 
     expect(fixture.runtimeOptions).toEqual([
       {
-        cdpUrl: FAKE_CDP_URL,
+        credentials: FAKE_CREDENTIALS,
         model: {
           kind: "native",
           modelName: "google/gemini-2.5-flash",
@@ -268,7 +273,7 @@ describe("createStagehandAgent", () => {
     const agent = await fixture.createAgent();
     const options = fixture.runtimeOptions[0];
 
-    expect(options?.cdpUrl).toBe(FAKE_CDP_URL);
+    expect(options?.credentials).toEqual(FAKE_CREDENTIALS);
     expect(options?.model.kind).toBe("client");
     if (options?.model.kind !== "client") {
       throw new Error("Expected a client model config.");
@@ -294,7 +299,7 @@ describe("createStagehandAgent", () => {
 
     expect(fixture.runtimeOptions).toEqual([
       {
-        cdpUrl: FAKE_CDP_URL,
+        credentials: FAKE_CREDENTIALS,
         model: {
           kind: "native",
           modelName: "google/gemini-2.5-flash",
@@ -302,7 +307,7 @@ describe("createStagehandAgent", () => {
         },
       },
       {
-        cdpUrl: FAKE_CDP_URL,
+        credentials: FAKE_CREDENTIALS,
         model: {
           kind: "native",
           modelName: "google/gemini-2.5-pro",
@@ -320,7 +325,7 @@ describe("createStagehandAgent", () => {
     const createRuntime: StagehandRuntimeFactory = () =>
       new Promise<StagehandRuntime>(() => undefined);
     const creating = createStagehandAgent({
-      cdpUrl: FAKE_CDP_URL,
+      credentials: FAKE_CREDENTIALS,
       providers: createProviderService(() => activeConfig()),
       registry: createRegistry(geminiAdapter),
       createRuntime,
@@ -357,7 +362,7 @@ describe("createStagehandAgent", () => {
     });
     const runtimeFactory: StagehandRuntimeFactory = () => runtimePromise;
     const creating = createStagehandAgent({
-      cdpUrl: FAKE_CDP_URL,
+      credentials: FAKE_CREDENTIALS,
       providers: createProviderService(() => activeConfig()),
       registry: createRegistry(geminiAdapter),
       createRuntime: runtimeFactory,
@@ -381,14 +386,16 @@ describe("createStagehandAgent", () => {
     expect(closeCalls).toEqual([1]);
   });
 
-  it("maps initialization failures without leaking the key", async () => {
+  it("maps initialization failures without leaking the key or CDP token", async () => {
     const createRuntime: StagehandRuntimeFactory = async () => {
-      throw new Error(`attach failed for ${FAKE_API_KEY}`);
+      throw new Error(
+        `attach failed for ${FAKE_API_KEY} ${FAKE_CREDENTIALS.bearerToken} ${FAKE_CREDENTIALS.extensionCdpUrl}`,
+      );
     };
 
     await expect(
       createStagehandAgent({
-        cdpUrl: FAKE_CDP_URL,
+        credentials: FAKE_CREDENTIALS,
         providers: createProviderService(() => activeConfig()),
         registry: createRegistry(geminiAdapter),
         createRuntime,
@@ -400,13 +407,15 @@ describe("createStagehandAgent", () => {
     });
 
     const error = await createStagehandAgent({
-      cdpUrl: FAKE_CDP_URL,
+      credentials: FAKE_CREDENTIALS,
       providers: createProviderService(() => activeConfig()),
       registry: createRegistry(geminiAdapter),
       createRuntime,
     }).catch((failure: unknown) => failure);
 
     expect(String(error)).not.toContain(FAKE_API_KEY);
+    expect(String(error)).not.toContain(FAKE_CREDENTIALS.bearerToken);
+    expect(String(error)).not.toContain("fake-agent-capability");
   });
 });
 

@@ -8,7 +8,7 @@ import {
   type AgentStepStore,
   type AgentStepVerification,
 } from "./agent-steps";
-import type { BrowserSessionContext } from "./browser-launcher";
+import type { BrowserSessionContext, CdpCredentials } from "./browser-launcher";
 import type { EventBus } from "./event-bus";
 import {
   createInputExecutor as createDefaultInputExecutor,
@@ -42,6 +42,7 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_INPUT_TIMEOUT_MS = 30_000;
 
 const SESSION_NOT_READY_REASON = "Sesi tidak siap menjalankan task.";
+const SESSION_CREDENTIALS_MISSING_REASON = "Kredensial CDP sesi tidak tersedia.";
 const SESSION_ENDED_REASON = "Sesi berakhir saat task berjalan.";
 const NO_ACTION_REASON = "Agent tidak menemukan aksi untuk langkah ini.";
 const VERIFICATION_UNREADABLE_REASON = "Verifikasi tidak dapat dibaca.";
@@ -92,6 +93,7 @@ export const verificationSchema = z.strictObject({
 export type TaskSessionSource = {
   get(sessionId: string): Session | null;
   getCdpUrl(sessionId: string): string | null;
+  getCdpCredentials(sessionId: string): CdpCredentials | null;
   getContext?(sessionId: string): BrowserSessionContext | null;
 };
 
@@ -111,7 +113,7 @@ export type TaskInputExecutorFactory = (
   options: InputExecutorOptions,
 ) => InputExecutor;
 
-export type TaskAgentFactory = (cdpUrl: string) => Promise<StagehandAgent>;
+export type TaskAgentFactory = (credentials: CdpCredentials) => Promise<StagehandAgent>;
 
 export type TaskRunnerOptions = {
   readonly sessions: TaskSessionSource;
@@ -901,9 +903,9 @@ class TaskRunnerImpl implements TaskRunner {
       options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
     this.createAgent =
       options.createAgent ??
-      ((cdpUrl) =>
+      ((credentials) =>
         createStagehandAgent({
-          cdpUrl,
+          credentials,
           providers: options.providers,
           registry: options.registry,
         }));
@@ -1050,6 +1052,12 @@ class TaskRunnerImpl implements TaskRunner {
         return;
       }
 
+      const credentials = this.sessions.getCdpCredentials(record.sessionId);
+      if (credentials === null) {
+        this.failTask(record, SESSION_CREDENTIALS_MISSING_REASON);
+        return;
+      }
+
       const policy = await this.resolvePolicy(record, session.profileId);
       if (policy === null) {
         return;
@@ -1068,7 +1076,7 @@ class TaskRunnerImpl implements TaskRunner {
         timeoutMs: this.inputTimeoutMs,
       });
       const goal = this.tasks.getTask(record.taskId)?.goal ?? "";
-      agent = await this.createAgentForTask(record, cdpUrl);
+      agent = await this.createAgentForTask(record, credentials);
 
       const navigation = await this.navigateToGoalUrl(record, goal, context);
       if (navigation === "failed") {
@@ -1310,9 +1318,9 @@ class TaskRunnerImpl implements TaskRunner {
 
   private async createAgentForTask(
     record: RunRecord,
-    cdpUrl: string,
+    credentials: CdpCredentials,
   ): Promise<StagehandAgent> {
-    const pending = Promise.resolve().then(() => this.createAgent(cdpUrl));
+    const pending = Promise.resolve().then(() => this.createAgent(credentials));
 
     try {
       return await raceAbort(pending, record.controller.signal);

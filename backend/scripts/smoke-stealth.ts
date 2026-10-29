@@ -564,7 +564,13 @@ async function runLaunch(options: {
     );
 
     const { localBrowser, Stagehand } = await import("@browserbasehq/stagehand");
-    stagehandBrowser = await localBrowser.connect({ cdpUrl: launched.cdpUrl });
+    stagehandBrowser = await localBrowser.connect({
+      cdpUrl: launched.credentials.gatewayUrl,
+      headers: {
+        Authorization: `Bearer ${launched.credentials.bearerToken}`,
+      },
+      extensionCdpUrl: launched.credentials.extensionCdpUrl,
+    });
     stagehand = await Stagehand.create({
       browser: stagehandBrowser,
       logging: { level: "off" },

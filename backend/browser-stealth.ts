@@ -31,7 +31,7 @@ export type FingerprintHardeningDependencies = {
 };
 
 export type FingerprintHardeningOptions = {
-  readonly cdpUrl: string;
+  readonly cdpUrl?: string;
   readonly profile: FingerprintProfile;
 };
 
@@ -321,8 +321,14 @@ export async function installFingerprintHardening(
   options: FingerprintHardeningOptions,
   dependencies: FingerprintHardeningDependencies = {},
 ): Promise<FingerprintHardening> {
+  const fetchVersion =
+    dependencies.fetchVersion ??
+    ((cdpUrl: string) => fetchCdpVersion(cdpUrl));
+  if (dependencies.fetchVersion === undefined && options.cdpUrl === undefined) {
+    throw new Error("CDP endpoint URL is required.");
+  }
   const webSocketUrl = resolveWebSocketUrl(
-    await (dependencies.fetchVersion ?? fetchCdpVersion)(options.cdpUrl),
+    await fetchVersion(options.cdpUrl ?? ""),
   );
   const transport = await (dependencies.connect ?? openWebSocketTransport)(webSocketUrl);
   const commandTimeoutMs = dependencies.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;

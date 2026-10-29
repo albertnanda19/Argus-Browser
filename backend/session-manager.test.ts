@@ -11,6 +11,7 @@ import {
 import type {
   BrowserLaunchResult,
   BrowserSessionContext,
+  CdpCredentials,
   LaunchBrowser,
   LaunchBrowserOptions,
 } from "./browser-launcher";
@@ -26,6 +27,12 @@ const testRoot = resolve(
 
 const now = new Date("2026-10-25T10:00:00.000Z");
 const fakeCdpUrl = "http://127.0.0.1:59876";
+const fakeCredentials: CdpCredentials = {
+  gatewayUrl: fakeCdpUrl,
+  bearerToken: "unit-test-bearer-token",
+  extensionCdpUrl:
+    "ws://127.0.0.1:59876/devtools/browser/test?token=unit-test-capability",
+};
 
 type FakeContext = BrowserSessionContext & {
   readonly closeCalls: number;
@@ -130,7 +137,12 @@ function createFakeLauncher(contexts: BrowserSessionContext[]): FakeLauncher {
       if (context === undefined) {
         throw new Error("No fake context available.");
       }
-      return { context, cdpUrl: fakeCdpUrl };
+      return {
+        context,
+        cdpUrl: fakeCdpUrl,
+        credentials: fakeCredentials,
+        pid: 4242,
+      };
     },
   };
 }
@@ -292,7 +304,12 @@ describe("start", () => {
       if (attempts === 1) {
         throw new Error("spawn /Users/secret/profile/chrome EACCES");
       }
-      return { context: createFakeContext(), cdpUrl: fakeCdpUrl };
+      return {
+        context: createFakeContext(),
+        cdpUrl: fakeCdpUrl,
+        credentials: fakeCredentials,
+        pid: 4242,
+      };
     };
     const manager = createManager(appDataDir, { launchBrowser });
 
@@ -338,7 +355,12 @@ describe("start", () => {
       expect(calls).toHaveLength(1);
     });
 
-    resolveLaunch({ context: createFakeContext(), cdpUrl: fakeCdpUrl });
+    resolveLaunch({
+      context: createFakeContext(),
+      cdpUrl: fakeCdpUrl,
+      credentials: fakeCredentials,
+      pid: 4242,
+    });
     await expect(first).resolves.toMatchObject({ status: "ready" });
 
     await manager.shutdown();
@@ -453,7 +475,12 @@ describe("close", () => {
     expect(sessionId).toBeDefined();
 
     const closing = manager.close(String(sessionId));
-    resolveLaunch({ context, cdpUrl: fakeCdpUrl });
+    resolveLaunch({
+      context,
+      cdpUrl: fakeCdpUrl,
+      credentials: fakeCredentials,
+      pid: 4242,
+    });
 
     await expect(starting).resolves.toMatchObject({ status: "ready" });
     await expect(closing).resolves.toMatchObject({ status: "closed" });
@@ -488,7 +515,7 @@ describe("close", () => {
       code: "session_close_failed",
       message: "Browser gagal ditutup.",
     });
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(8_000);
     await assertion;
   });
 });
@@ -690,5 +717,96 @@ describe("getCdpUrl", () => {
     const manager = createManager(newAppDataDir());
 
     expect(manager.getCdpUrl("s_aaaaaaaaaaaaaaaa")).toBeNull();
+  });
+});
+
+describe("getCdpCredentials", () => {
+  it("returns the credentials while the session is ready", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const manager = createManager(appDataDir, {
+      launchBrowser: createFakeLauncher([createFakeContext()]).launchBrowser,
+    });
+
+    const session = await manager.start(profile.id);
+
+    expect(manager.getCdpCredentials(session.id)).toEqual(fakeCredentials);
+
+    await manager.shutdown();
+  });
+
+  it("removes credentials before closing the context", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    let credentialsDuringClose: CdpCredentials | null | undefined;
+    let manager: ReturnType<typeof createManager> | null = null;
+    let sessionId = "";
+    const context = createFakeContext(async () => {
+      credentialsDuringClose = manager?.getCdpCredentials(sessionId);
+    });
+    manager = createManager(appDataDir, {
+      launchBrowser: createFakeLauncher([context]).launchBrowser,
+    });
+    const session = await manager.start(profile.id);
+    sessionId = session.id;
+
+    await manager.close(session.id);
+
+    expect(credentialsDuringClose).toBeNull();
+    expect(manager.getCdpCredentials(session.id)).toBeNull();
+  });
+
+  it("returns null after close", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const manager = createManager(appDataDir, {
+      launchBrowser: createFakeLauncher([createFakeContext()]).launchBrowser,
+    });
+    const session = await manager.start(profile.id);
+
+    await manager.close(session.id);
+
+    expect(manager.getCdpCredentials(session.id)).toBeNull();
+  });
+
+  it("returns null after the context closes unexpectedly", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const context = createFakeContext();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const manager = createManager(appDataDir, {
+      launchBrowser: createFakeLauncher([context]).launchBrowser,
+    });
+    const session = await manager.start(profile.id);
+
+    context.emitClose();
+
+    expect(manager.getCdpCredentials(session.id)).toBeNull();
+  });
+
+  it("returns null when the session fails to start", async () => {
+    const appDataDir = newAppDataDir();
+    const profile = await createProfile(appDataDir, "Sesi");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const manager = createManager(appDataDir, {
+      launchBrowser: async () => {
+        throw new Error("Chrome failed to launch.");
+      },
+    });
+
+    await expect(manager.start(profile.id)).rejects.toMatchObject({
+      code: "session_launch_failed",
+    });
+
+    const logged = String(warn.mock.calls[0]?.[0]);
+    const sessionId = logged.match(/s_[0-9a-f]{16}/)?.[0];
+    expect(sessionId).toBeDefined();
+    expect(manager.getCdpCredentials(String(sessionId))).toBeNull();
+  });
+
+  it("returns null for an unknown session", () => {
+    const manager = createManager(newAppDataDir());
+
+    expect(manager.getCdpCredentials("s_aaaaaaaaaaaaaaaa")).toBeNull();
   });
 });

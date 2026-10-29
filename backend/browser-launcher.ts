@@ -1,11 +1,40 @@
-import { createServer } from "node:net";
-import type { BrowserContext } from "playwright-core";
+import { randomBytes } from "node:crypto";
+import type { ConnectOverCDPTransport } from "playwright-core";
 import {
   createFingerprintProfile,
   installFingerprintHardening,
+  type CdpTransport,
   type FingerprintHardening,
+  type FingerprintHardeningDependencies,
   type FingerprintHardeningOptions,
 } from "./browser-stealth";
+import {
+  launchCdpPipe,
+  type CdpPipe,
+  type CdpPipeLaunchOptions,
+  type CdpWireMessage,
+} from "./cdp-pipe";
+import {
+  createCdpRouter,
+  type CdpClientSink,
+  type CdpRouter,
+  type CdpRouterClient,
+} from "./cdp-router";
+import {
+  startCdpGateway,
+  type CdpGateway,
+  type CdpGatewayOptions,
+} from "./cdp-gateway";
+
+const CONNECT_TIMEOUT_MS = 30_000;
+const BROWSER_EXIT_TIMEOUT_MS = 2_000;
+const CONTEXT_CLOSE_TIMEOUT_MS = 2_000;
+const HARDENING_CLOSE_TIMEOUT_MS = 1_000;
+const CLIENT_CLOSE_TIMEOUT_MS = 1_000;
+const BROWSER_CLOSE_TIMEOUT_MS = 1_000;
+const ROUTER_CLOSE_TIMEOUT_MS = 3_000;
+const GATEWAY_CLOSE_TIMEOUT_MS = 1_000;
+const PIPE_CLOSE_TIMEOUT_MS = 1_000;
 
 export type BrowserLocator = {
   click(options: { readonly timeout: number }): Promise<void>;
@@ -30,11 +59,36 @@ export type BrowserPage = {
   ): Promise<void>;
 };
 
+export type BrowserCookie = {
+  readonly name: string;
+  readonly value: string;
+  readonly domain: string;
+  readonly expires: number;
+};
+
+export type BrowserCookieParam = {
+  readonly name: string;
+  readonly value: string;
+  readonly url: string;
+  readonly expires: number;
+  readonly httpOnly?: boolean;
+  readonly secure?: boolean;
+  readonly sameSite?: "Strict" | "Lax" | "None";
+};
+
 export type BrowserSessionContext = {
   close(): Promise<void>;
   on(event: "close", listener: () => void): unknown;
   pages(): BrowserPage[];
   newPage(): Promise<BrowserPage>;
+  cookies?(url: string): Promise<BrowserCookie[]>;
+  addCookies?(cookies: readonly BrowserCookieParam[]): Promise<void>;
+};
+
+export type CdpCredentials = {
+  readonly gatewayUrl: string;
+  readonly bearerToken: string;
+  readonly extensionCdpUrl: string;
 };
 
 export type LaunchBrowserOptions = {
@@ -46,27 +100,32 @@ export type LaunchBrowserOptions = {
 export type BrowserLaunchResult = {
   readonly context: BrowserSessionContext;
   readonly cdpUrl: string;
+  readonly credentials: CdpCredentials;
+  readonly pid: number;
 };
 
 export type LaunchBrowser = (options: LaunchBrowserOptions) => Promise<BrowserLaunchResult>;
 
-export type CdpLaunchArguments = {
-  readonly args: string[];
-  readonly ignoreDefaultArgs: string[];
+export type PlaywrightBrowser = {
+  contexts(): readonly BrowserSessionContext[];
+  close(): Promise<void>;
 };
 
 export type LaunchBrowserDependencies = {
-  readonly allocateCdpPort?: () => Promise<number>;
-  readonly waitForCdpReady?: (cdpUrl: string) => Promise<void>;
+  readonly spawnChrome?: (options: CdpPipeLaunchOptions) => Promise<CdpPipe>;
+  readonly connectBrowser?: (
+    transport: ConnectOverCDPTransport,
+  ) => Promise<PlaywrightBrowser>;
   readonly installFingerprintHardening?: (
     options: FingerprintHardeningOptions,
+    dependencies?: FingerprintHardeningDependencies,
   ) => Promise<FingerprintHardening>;
+  readonly startGateway?: (options: CdpGatewayOptions) => Promise<CdpGateway>;
 };
 
-const CDP_READY_TIMEOUT_MS = 5_000;
-const CDP_PROBE_TIMEOUT_MS = 1_000;
-const CDP_POLL_INTERVAL_MS = 100;
-const CDP_CLOSE_TIMEOUT_MS = 5_000;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolvePromise, rejectPromise) => {
@@ -87,119 +146,313 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-export function createCdpUrl(port: number): string {
-  return `http://127.0.0.1:${port}`;
+async function closeWithTimeout(
+  promise: Promise<unknown> | undefined,
+  timeoutMs: number,
+): Promise<void> {
+  if (promise === undefined) {
+    return;
+  }
+  try {
+    await withTimeout(promise, timeoutMs);
+  } catch {
+    return;
+  }
 }
 
-export function createCdpLaunchArguments(port: number): CdpLaunchArguments {
+export function createCdpLaunchArguments(): readonly string[] {
+  return [
+    "--enable-unsafe-extension-debugging",
+    "--disable-blink-features=AutomationControlled",
+  ];
+}
+
+function toWireCommand(message: unknown): CdpWireMessage {
+  if (
+    !isRecord(message) ||
+    typeof message.id !== "number" ||
+    typeof message.method !== "string"
+  ) {
+    throw new Error("CDP command is invalid.");
+  }
+  const params = message.params;
+  const sessionId = message.sessionId;
+  if (sessionId !== undefined && typeof sessionId !== "string") {
+    throw new Error("CDP command is invalid.");
+  }
   return {
-    args: [
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      "--remote-allow-origins=*",
-      "--enable-unsafe-extension-debugging",
-      "--disable-blink-features=AutomationControlled",
-    ],
-    ignoreDefaultArgs: ["--disable-extensions", "--enable-automation"],
+    id: message.id,
+    method: message.method,
+    ...(params === undefined ? {} : { params }),
+    ...(sessionId === undefined ? {} : { sessionId }),
   };
 }
 
-export async function allocateCdpPort(): Promise<number> {
-  return await new Promise<number>((resolvePort, rejectPort) => {
-    const server = createServer();
-    server.once("error", rejectPort);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (address === null || typeof address === "string") {
-        server.close();
-        rejectPort(new Error("CDP port allocation returned no address."));
-        return;
+async function connectPlaywright(
+  router: CdpRouter,
+  connectBrowser: (transport: ConnectOverCDPTransport) => Promise<PlaywrightBrowser>,
+): Promise<{ readonly browser: PlaywrightBrowser; readonly client: CdpRouterClient }> {
+  let client: CdpRouterClient | null = null;
+  const transport: ConnectOverCDPTransport = {
+    send(message) {
+      if (client === null) {
+        throw new Error("Playwright CDP client is not ready.");
       }
+      client.send(toWireCommand(message));
+    },
+    close() {
+      if (client !== null) {
+        void client.close();
+      }
+    },
+  };
+  const sink: CdpClientSink = {
+    send(message) {
+      transport.onmessage?.(message);
+      return true;
+    },
+    close() {
+      transport.onclose?.("closed");
+    },
+  };
 
-      server.close((error) => {
-        if (error !== undefined) {
-          rejectPort(error);
-          return;
-        }
-        resolvePort(address.port);
-      });
-    });
-  });
-}
-
-async function probeCdp(cdpUrl: string, timeoutMs: number): Promise<boolean> {
+  client = await router.addClient(sink);
   try {
-    const response = await fetch(`${cdpUrl}/json/version`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    return response.ok;
-  } catch {
-    return false;
+    const browser = await connectBrowser(transport);
+    return { browser, client };
+  } catch (error) {
+    await client.close().catch(() => undefined);
+    throw error;
   }
 }
 
-export async function waitForCdpReady(
-  cdpUrl: string,
-  probe: (url: string, timeoutMs: number) => Promise<boolean> = probeCdp,
-): Promise<void> {
-  const deadline = Date.now() + CDP_READY_TIMEOUT_MS;
+async function connectHardening(
+  router: CdpRouter,
+  profile: ReturnType<typeof createFingerprintProfile>,
+  install: (
+    options: FingerprintHardeningOptions,
+    dependencies?: FingerprintHardeningDependencies,
+  ) => Promise<FingerprintHardening>,
+): Promise<{ readonly hardening: FingerprintHardening; readonly client: CdpRouterClient }> {
+  const messageListeners = new Set<(message: unknown) => void>();
+  const closeListeners = new Set<() => void>();
+  let client: CdpRouterClient | null = null;
+  const transport: CdpTransport = {
+    send(message) {
+      if (client === null) {
+        throw new Error("Fingerprint CDP client is not ready.");
+      }
+      client.send(toWireCommand(message));
+    },
+    close() {
+      if (client !== null) {
+        void client.close();
+      }
+    },
+    onMessage(listener) {
+      messageListeners.add(listener);
+    },
+    onClose(listener) {
+      closeListeners.add(listener);
+    },
+  };
+  const sink: CdpClientSink = {
+    send(message) {
+      for (const listener of messageListeners) {
+        listener(message);
+      }
+      return true;
+    },
+    close() {
+      for (const listener of closeListeners) {
+        listener();
+      }
+    },
+  };
 
-  for (;;) {
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) {
-      throw new Error(`CDP endpoint is not ready after ${CDP_READY_TIMEOUT_MS} ms.`);
-    }
+  client = await router.addClient(sink);
+  try {
+    const hardening = await install(
+      { profile },
+      {
+        fetchVersion: async () => ({
+          webSocketDebuggerUrl: "in-process://cdp-router",
+        }),
+        connect: async () => transport,
+      },
+    );
+    return { hardening, client };
+  } catch (error) {
+    await client.close().catch(() => undefined);
+    throw error;
+  }
+}
 
-    if (await probe(cdpUrl, Math.min(CDP_PROBE_TIMEOUT_MS, remainingMs))) {
+function createManagedContext(
+  context: BrowserSessionContext,
+  cleanup: () => Promise<void>,
+  initiallyClosed: boolean,
+): { readonly context: BrowserSessionContext; readonly notifyClose: () => void } {
+  const listeners = new Set<() => void>();
+  const cookies = context.cookies?.bind(context);
+  const addCookies = context.addCookies?.bind(context);
+  let isClosed = initiallyClosed;
+  let closePromise: Promise<void> | null = null;
+
+  const notifyClose = (): void => {
+    if (isClosed) {
       return;
     }
-
-    const waitMs = deadline - Date.now();
-    if (waitMs <= 0) {
-      throw new Error(`CDP endpoint is not ready after ${CDP_READY_TIMEOUT_MS} ms.`);
+    isClosed = true;
+    for (const listener of listeners) {
+      listener();
     }
+  };
 
-    await new Promise<void>((resolveDelay) => {
-      setTimeout(resolveDelay, Math.min(CDP_POLL_INTERVAL_MS, waitMs));
-    });
-  }
+  context.on("close", () => {
+    void cleanup().finally(notifyClose);
+  });
+
+  const managedContext: BrowserSessionContext = {
+    close() {
+      closePromise ??= (async () => {
+        try {
+          await withTimeout(context.close(), CONTEXT_CLOSE_TIMEOUT_MS);
+        } catch (error) {
+          console.warn(
+            `Browser context close failed: ${error instanceof Error ? error.name : "unknown"}`,
+          );
+        } finally {
+          await cleanup();
+          notifyClose();
+        }
+      })();
+      return closePromise;
+    },
+    on(_event, listener) {
+      if (isClosed) {
+        listener();
+        return;
+      }
+      listeners.add(listener);
+    },
+    pages() {
+      return context.pages();
+    },
+    newPage() {
+      return context.newPage();
+    },
+    ...(cookies === undefined ? {} : { cookies }),
+    ...(addCookies === undefined ? {} : { addCookies }),
+  };
+
+  return { context: managedContext, notifyClose };
 }
 
 export async function launchBrowserWithDependencies(
   options: LaunchBrowserOptions,
   dependencies: LaunchBrowserDependencies = {},
 ): Promise<BrowserLaunchResult> {
-  const { chromium } = await import("playwright-core");
-  const port = await (dependencies.allocateCdpPort ?? allocateCdpPort)();
-  const cdpUrl = createCdpUrl(port);
-  const launchArguments = createCdpLaunchArguments(port);
-  const context: BrowserContext = await chromium.launchPersistentContext(options.userDataDir, {
+  const spawnChrome = dependencies.spawnChrome ?? launchCdpPipe;
+  const install = dependencies.installFingerprintHardening ?? installFingerprintHardening;
+  const startGateway = dependencies.startGateway ?? startCdpGateway;
+  const pipe = await spawnChrome({
     executablePath: options.executablePath,
-    headless: false,
-    timeout: 30_000,
-    handleSIGINT: false,
-    handleSIGTERM: false,
-    handleSIGHUP: false,
-    args: launchArguments.args,
-    ignoreDefaultArgs: launchArguments.ignoreDefaultArgs,
+    userDataDir: options.userDataDir,
+    args: createCdpLaunchArguments(),
+    browserCloseTimeoutMs: BROWSER_EXIT_TIMEOUT_MS,
+  });
+  const router = createCdpRouter(pipe);
+  const bearerToken = randomBytes(32).toString("base64url");
+  const profile = createFingerprintProfile(options.profileId ?? options.userDataDir);
+
+  let playwrightClient: CdpRouterClient | null = null;
+  let hardeningClient: CdpRouterClient | null = null;
+  let browser: PlaywrightBrowser | null = null;
+  let hardening: FingerprintHardening | null = null;
+  let gateway: CdpGateway | null = null;
+  let context: BrowserSessionContext | null = null;
+  let cleanupPromise: Promise<void> | null = null;
+  let isPipeClosed = false;
+
+  const cleanup = (): Promise<void> => {
+    cleanupPromise ??= (async () => {
+      await closeWithTimeout(hardening?.close(), HARDENING_CLOSE_TIMEOUT_MS);
+      hardening = null;
+      await closeWithTimeout(hardeningClient?.close(), CLIENT_CLOSE_TIMEOUT_MS);
+      hardeningClient = null;
+      await closeWithTimeout(playwrightClient?.close(), CLIENT_CLOSE_TIMEOUT_MS);
+      playwrightClient = null;
+      await closeWithTimeout(browser?.close(), BROWSER_CLOSE_TIMEOUT_MS);
+      browser = null;
+      await closeWithTimeout(router.close(), ROUTER_CLOSE_TIMEOUT_MS);
+      await closeWithTimeout(gateway?.close(), GATEWAY_CLOSE_TIMEOUT_MS);
+      gateway = null;
+      await closeWithTimeout(pipe.close(), PIPE_CLOSE_TIMEOUT_MS);
+    })();
+    return cleanupPromise;
+  };
+
+  pipe.onClose(() => {
+    isPipeClosed = true;
+    void cleanup();
   });
 
   try {
-    await (dependencies.waitForCdpReady ?? waitForCdpReady)(cdpUrl);
-    const hardening = await (dependencies.installFingerprintHardening ??
-      installFingerprintHardening)({
-      cdpUrl,
-      profile: createFingerprintProfile(options.profileId ?? options.userDataDir),
-    });
-    context.on("close", () => {
-      void hardening.close();
-    });
+    const connected = await connectPlaywright(
+      router,
+      dependencies.connectBrowser ??
+        (async (transport) => {
+          const { chromium } = await import("playwright-core");
+          return await chromium.connectOverCDP(transport, {
+            timeout: CONNECT_TIMEOUT_MS,
+          });
+        }),
+    );
+    browser = connected.browser;
+    playwrightClient = connected.client;
+
+    const defaultContext = browser.contexts()[0];
+    if (defaultContext === undefined) {
+      throw new Error("Playwright did not expose a browser context.");
+    }
+    if (defaultContext.pages().length === 0) {
+      await defaultContext.newPage();
+    }
+    context = defaultContext;
+
+    const hardened = await connectHardening(router, profile, install);
+    hardening = hardened.hardening;
+    hardeningClient = hardened.client;
+
+    gateway = await startGateway({ router, apiToken: bearerToken });
   } catch (error) {
-    await withTimeout(context.close(), CDP_CLOSE_TIMEOUT_MS).catch(() => undefined);
+    await cleanup();
     throw error;
   }
 
-  return { context, cdpUrl };
+  if (context === null || gateway === null) {
+    await cleanup();
+    throw new Error("Browser launch did not complete.");
+  }
+
+  const managedContext = createManagedContext(context, cleanup, isPipeClosed);
+  if (!isPipeClosed) {
+    pipe.onClose(() => {
+      void cleanup().finally(managedContext.notifyClose);
+    });
+  }
+
+  return {
+    context: managedContext.context,
+    cdpUrl: gateway.httpUrl,
+    credentials: {
+      gatewayUrl: gateway.httpUrl,
+      bearerToken,
+      extensionCdpUrl: gateway.webSocketDebuggerUrl,
+    },
+    pid: pipe.pid,
+  };
 }
 
 export const launchBrowser: LaunchBrowser = (options) =>

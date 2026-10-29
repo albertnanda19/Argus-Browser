@@ -1,258 +1,397 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  allocateCdpPort,
   createCdpLaunchArguments,
-  createCdpUrl,
-  launchBrowser,
   launchBrowserWithDependencies,
-  waitForCdpReady,
+  type BrowserPage,
   type BrowserSessionContext,
+  type PlaywrightBrowser,
 } from "./browser-launcher";
+import type { CdpPipe, CdpPipeLaunchOptions, CdpWireMessage } from "./cdp-pipe";
+import type { CdpGateway, CdpGatewayOptions } from "./cdp-gateway";
+import type { FingerprintHardening, FingerprintHardeningOptions } from "./browser-stealth";
+import type { ConnectOverCDPTransport } from "playwright-core";
 
-const { launchPersistentContext } = vi.hoisted(() => ({
-  launchPersistentContext: vi.fn(),
-}));
+type FakePipe = {
+  readonly pipe: CdpPipe;
+  readonly sent: CdpWireMessage[];
+  readonly closeCalls: () => number;
+  emitClose(): void;
+};
 
-const { installFingerprintHardening } = vi.hoisted(() => ({
-  installFingerprintHardening: vi.fn(),
-}));
-
-vi.mock("playwright-core", () => ({
-  chromium: { launchPersistentContext },
-}));
-
-vi.mock("./browser-stealth", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./browser-stealth")>();
-  return { ...actual, installFingerprintHardening };
-});
-
-function createFakeContext() {
+function createFakePipe(): FakePipe {
+  const messageListeners = new Set<(message: CdpWireMessage) => void>();
+  const closeListeners = new Set<(error?: Error) => void>();
+  const sent: CdpWireMessage[] = [];
   let closeCalls = 0;
-  const listeners: Array<() => void> = [];
-  const context: BrowserSessionContext = {
-    async close() {
-      closeCalls += 1;
+  let isClosed = false;
+  let closePromise: Promise<void> | null = null;
+
+  const notifyClose = (error?: Error): void => {
+    if (isClosed) {
+      return;
+    }
+    isClosed = true;
+    for (const listener of closeListeners) {
+      listener(error);
+    }
+  };
+
+  const pipe: CdpPipe = {
+    pid: 4242,
+    send(message) {
+      sent.push(message);
+      if (message.method === "Target.attachToBrowserTarget" && typeof message.id === "number") {
+        const id = message.id;
+        queueMicrotask(() => {
+          if (isClosed) {
+            return;
+          }
+          for (const listener of messageListeners) {
+            listener({ id, result: { sessionId: `browser-${id}` } });
+          }
+        });
+      }
     },
-    on(_event, listener) {
-      listeners.push(listener);
+    onMessage(listener) {
+      messageListeners.add(listener);
     },
-    pages: () => [],
-    async newPage() {
-      throw new Error("Unused page creation.");
+    onClose(listener) {
+      closeListeners.add(listener);
+    },
+    close() {
+      closePromise ??= (async () => {
+        closeCalls += 1;
+        notifyClose();
+      })();
+      return closePromise;
     },
   };
+
   return {
-    context,
-    get closeCalls() {
-      return closeCalls;
-    },
+    pipe,
+    sent,
+    closeCalls: () => closeCalls,
     emitClose() {
-      for (const listener of listeners) {
-        listener();
-      }
+      notifyClose(new Error("CDP pipe closed."));
     },
   };
 }
 
-beforeEach(() => {
-  installFingerprintHardening.mockResolvedValue({ close: async () => undefined });
-});
+function createFakePage(): BrowserPage {
+  return {
+    goto: async () => undefined,
+    url: () => "about:blank",
+    locator: () => ({
+      click: async () => undefined,
+      fill: async () => undefined,
+      innerText: async () => "",
+    }),
+  };
+}
+
+type FakeContext = BrowserSessionContext & {
+  readonly closeCalls: () => number;
+  readonly newPageCalls: () => number;
+};
+
+function createFakeContext(): FakeContext {
+  const listeners: Array<() => void> = [];
+  const pages: BrowserPage[] = [createFakePage()];
+  let closeCalls = 0;
+  let newPageCalls = 0;
+
+  const context: FakeContext = {
+    closeCalls: () => closeCalls,
+    newPageCalls: () => newPageCalls,
+    async close() {
+      closeCalls += 1;
+      for (const listener of listeners) {
+        listener();
+      }
+    },
+    on(_event, listener) {
+      listeners.push(listener);
+    },
+    pages: () => pages,
+    async newPage() {
+      newPageCalls += 1;
+      const page = createFakePage();
+      pages.push(page);
+      return page;
+    },
+    async cookies() {
+      return [];
+    },
+    async addCookies() {
+      return undefined;
+    },
+  };
+
+  return context;
+}
+
+type FakeBrowser = PlaywrightBrowser & {
+  readonly context: FakeContext;
+  readonly closeCalls: () => number;
+};
+
+function createFakeBrowser(context: FakeContext = createFakeContext()): FakeBrowser {
+  let closeCalls = 0;
+  return {
+    context,
+    closeCalls: () => closeCalls,
+    contexts: () => [context],
+    async close() {
+      closeCalls += 1;
+    },
+  };
+}
+
+function createFakeGateway(port = 54321): CdpGateway {
+  return {
+    port,
+    httpUrl: `http://127.0.0.1:${port}`,
+    webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/test?token=capability`,
+    capabilityToken: "capability",
+    async close() {
+      return undefined;
+    },
+  };
+}
+
+type Harness = {
+  readonly spawnOptions: CdpPipeLaunchOptions[];
+  readonly gatewayOptions: CdpGatewayOptions[];
+  readonly installOptions: FingerprintHardeningOptions[];
+  readonly connectCalls: ConnectOverCDPTransport[];
+  readonly pipe: FakePipe;
+  readonly browser: FakeBrowser;
+  readonly hardening: FingerprintHardening & { readonly close: ReturnType<typeof vi.fn> };
+  readonly gateway: CdpGateway;
+  readonly events: string[];
+  readonly launch: () => ReturnType<typeof launchBrowserWithDependencies>;
+};
+
+function createHarness(
+  overrides: {
+    readonly connectBrowser?: (transport: ConnectOverCDPTransport) => Promise<PlaywrightBrowser>;
+    readonly startGateway?: (options: CdpGatewayOptions) => Promise<CdpGateway>;
+    readonly installFingerprintHardening?: (
+      options: FingerprintHardeningOptions,
+      dependencies?: unknown,
+    ) => Promise<FingerprintHardening>;
+  } = {},
+): Harness {
+  const spawnOptions: CdpPipeLaunchOptions[] = [];
+  const gatewayOptions: CdpGatewayOptions[] = [];
+  const installOptions: FingerprintHardeningOptions[] = [];
+  const connectCalls: ConnectOverCDPTransport[] = [];
+  const events: string[] = [];
+  const pipe = createFakePipe();
+  pipe.pipe.onClose(() => events.push("pipe-close"));
+  const context = createFakeContext();
+  const browser = createFakeBrowser(context);
+  const hardening = {
+    close: vi.fn(async () => {
+      events.push("hardening-close");
+    }),
+  };
+  const gateway: CdpGateway = {
+    ...createFakeGateway(),
+    async close() {
+      events.push("gateway-close");
+    },
+  };
+
+  return {
+    spawnOptions,
+    gatewayOptions,
+    installOptions,
+    connectCalls,
+    pipe,
+    browser,
+    hardening,
+    gateway,
+    events,
+    launch: () =>
+      launchBrowserWithDependencies(
+        { executablePath: "/chrome", userDataDir: "/profile", profileId: "p_aaaaaaaaaaaaaaaa" },
+        {
+          spawnChrome: async (options) => {
+            spawnOptions.push(options);
+            return pipe.pipe;
+          },
+          connectBrowser: async (transport) => {
+            connectCalls.push(transport);
+            if (overrides.connectBrowser !== undefined) {
+              return await overrides.connectBrowser(transport);
+            }
+            return browser;
+          },
+          startGateway: async (options) => {
+            gatewayOptions.push(options);
+            if (overrides.startGateway !== undefined) {
+              return await overrides.startGateway(options);
+            }
+            return gateway;
+          },
+          installFingerprintHardening: async (options, dependencies) => {
+            installOptions.push(options);
+            if (overrides.installFingerprintHardening !== undefined) {
+              return await overrides.installFingerprintHardening(options, dependencies);
+            }
+            return hardening;
+          },
+        },
+      ),
+  };
+}
 
 afterEach(() => {
-  launchPersistentContext.mockReset();
-  installFingerprintHardening.mockReset();
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
-describe("CDP launch configuration", () => {
-  it("assembles loopback arguments for a random CDP port", () => {
-    const launchArguments = createCdpLaunchArguments(54321);
+describe("createCdpLaunchArguments", () => {
+  it("never opens a TCP debugging port", () => {
+    const args = createCdpLaunchArguments();
 
-    expect(launchArguments.args).toContain("--remote-debugging-port=54321");
-    expect(launchArguments.args).toContain("--remote-debugging-address=127.0.0.1");
-    expect(launchArguments.args).toContain("--remote-allow-origins=*");
-    expect(launchArguments.args).toContain("--enable-unsafe-extension-debugging");
-    expect(launchArguments.args).toContain(
-      "--disable-blink-features=AutomationControlled",
-    );
-    expect(launchArguments.args).not.toContain("--enable-automation");
-    expect(launchArguments.ignoreDefaultArgs).toContain("--disable-extensions");
-    expect(launchArguments.ignoreDefaultArgs).toContain("--enable-automation");
-    expect(createCdpUrl(54321)).toBe("http://127.0.0.1:54321");
-  });
-
-  it("allocates a loopback port that is not the default 9222", async () => {
-    const port = await allocateCdpPort();
-
-    expect(port).toBeGreaterThan(0);
-    expect(port).not.toBe(9222);
-    expect(createCdpUrl(port)).toBe(`http://127.0.0.1:${port}`);
+    expect(args).toContain("--enable-unsafe-extension-debugging");
+    expect(args).toContain("--disable-blink-features=AutomationControlled");
+    expect(args.some((arg) => arg.startsWith("--remote-debugging-port"))).toBe(false);
+    expect(args).not.toContain("--remote-allow-origins=*");
+    expect(args).not.toContain("--enable-automation");
   });
 });
 
-describe("waitForCdpReady", () => {
-  it("waits until the CDP endpoint answers", async () => {
-    const probe = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+describe("launchBrowserWithDependencies", () => {
+  it("spawns Chrome with the pipe transport and no TCP debugging flags", async () => {
+    const harness = createHarness();
 
-    await waitForCdpReady("http://127.0.0.1:54321", probe);
+    await harness.launch();
 
-    expect(probe).toHaveBeenCalledTimes(2);
-  });
-
-  it("fails when the CDP endpoint never answers", async () => {
-    vi.useFakeTimers();
-    const probe = vi.fn(async () => false);
-
-    const waiting = waitForCdpReady("http://127.0.0.1:54321", probe);
-    const assertion = expect(waiting).rejects.toThrow(/CDP endpoint is not ready/);
-    await vi.runAllTimersAsync();
-    await assertion;
-  });
-});
-
-describe("launchBrowser", () => {
-  it("launches Chrome with the CDP flags and returns the endpoint", async () => {
-    const fake = createFakeContext();
-    launchPersistentContext.mockResolvedValue(fake.context);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({ ok: true })),
-    );
-
-    const result = await launchBrowser({
-      executablePath: "/chrome",
-      userDataDir: "/profile",
-    });
-
-    const port = Number(new URL(result.cdpUrl).port);
-
-    expect(result.context).toBe(fake.context);
-    expect(result.cdpUrl).toBe(createCdpUrl(port));
-    expect(port).not.toBe(9222);
-    expect(launchPersistentContext).toHaveBeenCalledTimes(1);
-
-    expect(launchPersistentContext).toHaveBeenCalledWith(
-      "/profile",
-      expect.objectContaining({
-        executablePath: "/chrome",
-        headless: false,
-        timeout: 30_000,
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false,
-        args: expect.arrayContaining([
-          `--remote-debugging-port=${port}`,
-          "--remote-allow-origins=*",
-          "--enable-unsafe-extension-debugging",
-        ]),
-        ignoreDefaultArgs: ["--disable-extensions", "--enable-automation"],
-      }),
-    );
-  });
-
-  it("installs fingerprint hardening with the profile identity", async () => {
-    const fake = createFakeContext();
-    launchPersistentContext.mockResolvedValue(fake.context);
-    const hardening = vi.fn(async () => ({ close: async () => undefined }));
-
-    await launchBrowserWithDependencies(
+    expect(harness.spawnOptions).toEqual([
       {
         executablePath: "/chrome",
         userDataDir: "/profile",
-        profileId: "p_aaaaaaaaaaaaaaaa",
+        args: createCdpLaunchArguments(),
+        browserCloseTimeoutMs: expect.any(Number),
       },
-      {
-        allocateCdpPort: async () => 54321,
-        waitForCdpReady: async () => undefined,
-        installFingerprintHardening: hardening,
-      },
-    );
+    ]);
+    const args = harness.spawnOptions[0]?.args ?? [];
+    expect(args.some((arg) => arg.startsWith("--remote-debugging-port"))).toBe(false);
+    expect(args).not.toContain("--remote-allow-origins=*");
+  });
 
-    expect(hardening).toHaveBeenCalledWith({
-      cdpUrl: "http://127.0.0.1:54321",
+  it("connects Playwright through the router and exposes a usable context", async () => {
+    const harness = createHarness();
+
+    const result = await harness.launch();
+
+    expect(harness.connectCalls).toHaveLength(1);
+    expect(result.context.pages()).toHaveLength(1);
+    await expect(result.context.newPage()).resolves.toBeDefined();
+    expect(harness.browser.context.newPageCalls()).toBe(1);
+    expect(result.pid).toBe(4242);
+    expect(harness.gatewayOptions).toHaveLength(1);
+    expect(harness.gatewayOptions[0]?.router).toBeDefined();
+  });
+
+  it("starts the gateway with a unique bearer token that never enters cdpUrl", async () => {
+    const first = createHarness();
+    const second = createHarness();
+
+    const firstResult = await first.launch();
+    const secondResult = await second.launch();
+
+    const firstToken = first.gatewayOptions[0]?.apiToken ?? "";
+    const secondToken = second.gatewayOptions[0]?.apiToken ?? "";
+
+    expect(firstToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(secondToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(firstToken).not.toBe(secondToken);
+    expect(firstResult.credentials.bearerToken).toBe(firstToken);
+    expect(firstResult.cdpUrl).toBe(firstResult.credentials.gatewayUrl);
+    expect(firstResult.cdpUrl).not.toContain(firstToken);
+    expect(firstResult.credentials.extensionCdpUrl).toBe(
+      first.gateway.webSocketDebuggerUrl,
+    );
+  });
+
+  it("installs fingerprint hardening through an in-process router transport", async () => {
+    const harness = createHarness();
+
+    await harness.launch();
+
+    expect(harness.installOptions).toHaveLength(1);
+    expect(harness.installOptions[0]).toEqual({
       profile: expect.objectContaining({ key: "p_aaaaaaaaaaaaaaaa" }),
     });
+    expect(harness.installOptions[0]).not.toHaveProperty("cdpUrl");
   });
 
-  it("derives the fingerprint key from the profile directory when profileId is absent", async () => {
-    const fake = createFakeContext();
-    launchPersistentContext.mockResolvedValue(fake.context);
-    const hardening = vi.fn(async () => ({ close: async () => undefined }));
+  it("closes the context, router, gateway, and pipe in order", async () => {
+    const harness = createHarness();
+    const result = await harness.launch();
 
-    await launchBrowserWithDependencies(
-      { executablePath: "/chrome", userDataDir: "/profile" },
-      {
-        allocateCdpPort: async () => 54321,
-        waitForCdpReady: async () => undefined,
-        installFingerprintHardening: hardening,
-      },
+    harness.browser.context.on("close", () => harness.events.push("context-close"));
+    await result.context.close();
+
+    expect(harness.browser.context.closeCalls()).toBe(1);
+    expect(harness.hardening.close).toHaveBeenCalledTimes(1);
+    expect(harness.browser.closeCalls()).toBe(1);
+    expect(harness.pipe.closeCalls()).toBeGreaterThanOrEqual(1);
+    expect(harness.events.indexOf("context-close")).toBeGreaterThanOrEqual(0);
+    expect(harness.events.indexOf("pipe-close")).toBeGreaterThanOrEqual(0);
+    expect(harness.events.indexOf("gateway-close")).toBeGreaterThan(
+      harness.events.indexOf("pipe-close"),
     );
+    expect(harness.events.indexOf("gateway-close")).toBeGreaterThan(
+      harness.events.indexOf("context-close"),
+    );
+  });
 
-    expect(hardening).toHaveBeenCalledWith({
-      cdpUrl: "http://127.0.0.1:54321",
-      profile: expect.objectContaining({ key: "/profile" }),
+  it("cleans up Chrome and the router when Playwright cannot connect", async () => {
+    const harness = createHarness({
+      connectBrowser: async () => {
+        throw new Error("Playwright connection failed.");
+      },
     });
+
+    await expect(harness.launch()).rejects.toThrow("Playwright connection failed");
+
+    expect(harness.gatewayOptions).toHaveLength(0);
+    expect(harness.pipe.closeCalls()).toBeGreaterThanOrEqual(1);
+    expect(harness.hardening.close).not.toHaveBeenCalled();
   });
 
-  it("closes the context when fingerprint hardening fails", async () => {
-    const fake = createFakeContext();
-    launchPersistentContext.mockResolvedValue(fake.context);
-
-    await expect(
-      launchBrowserWithDependencies(
-        { executablePath: "/chrome", userDataDir: "/profile" },
-        {
-          allocateCdpPort: async () => 54321,
-          waitForCdpReady: async () => undefined,
-          installFingerprintHardening: async () => {
-            throw new Error("Fingerprint hardening failed.");
-          },
-        },
-      ),
-    ).rejects.toThrow("Fingerprint hardening failed");
-
-    expect(fake.closeCalls).toBe(1);
-  });
-
-  it("closes fingerprint hardening when the context closes", async () => {
-    const fake = createFakeContext();
-    launchPersistentContext.mockResolvedValue(fake.context);
-    const close = vi.fn(async () => undefined);
-
-    await launchBrowserWithDependencies(
-      { executablePath: "/chrome", userDataDir: "/profile" },
-      {
-        allocateCdpPort: async () => 54321,
-        waitForCdpReady: async () => undefined,
-        installFingerprintHardening: async () => ({ close }),
+  it("cleans up Chrome, router, and context when the gateway fails to start", async () => {
+    const harness = createHarness({
+      startGateway: async () => {
+        throw new Error("Gateway failed.");
       },
-    );
+    });
 
-    fake.emitClose();
+    await expect(harness.launch()).rejects.toThrow("Gateway failed");
+
+    expect(harness.hardening.close).toHaveBeenCalledTimes(1);
+    expect(harness.browser.closeCalls()).toBe(1);
+    expect(harness.pipe.closeCalls()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("closes the returned context exactly once when the pipe closes", async () => {
+    const harness = createHarness();
+    const result = await harness.launch();
+    let closeEvents = 0;
+    result.context.on("close", () => {
+      closeEvents += 1;
+    });
+
+    harness.pipe.emitClose();
+    harness.pipe.emitClose();
 
     await vi.waitFor(() => {
-      expect(close).toHaveBeenCalledTimes(1);
+      expect(closeEvents).toBe(1);
     });
-  });
-
-  it("closes the partial context when CDP readiness fails", async () => {
-    const fake = createFakeContext();
-    launchPersistentContext.mockResolvedValue(fake.context);
-
-    await expect(
-      launchBrowserWithDependencies(
-        { executablePath: "/chrome", userDataDir: "/profile" },
-        {
-          allocateCdpPort: async () => 54321,
-          waitForCdpReady: async () => {
-            throw new Error("CDP endpoint is not ready after 5000 ms.");
-          },
-        },
-      ),
-    ).rejects.toThrow("CDP endpoint is not ready");
-
-    expect(fake.closeCalls).toBe(1);
+    expect(harness.events).toContain("gateway-close");
   });
 });

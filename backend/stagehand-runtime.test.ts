@@ -9,7 +9,7 @@ import {
 } from "./stagehand-runtime";
 
 const stagehandMocks = vi.hoisted(() => ({
-  connect: vi.fn(async (_options: { readonly cdpUrl: string }) => ({ connected: true })),
+  connect: vi.fn(async (_options: unknown) => ({ connected: true })),
   create: vi.fn(async (_options: unknown) => ({})),
 }));
 
@@ -17,6 +17,13 @@ vi.mock("@browserbasehq/stagehand", () => ({
   localBrowser: { connect: stagehandMocks.connect },
   Stagehand: { create: stagehandMocks.create },
 }));
+
+const fakeCredentials = {
+  gatewayUrl: "http://127.0.0.1:59876",
+  bearerToken: "unit-test-runtime-bearer",
+  extensionCdpUrl:
+    "ws://127.0.0.1:59876/devtools/browser/test?token=unit-test-runtime-capability",
+};
 
 const PROBE_TIMEOUT_MS = 3_000;
 const RELOAD_TIMEOUT_MS = 30_000;
@@ -71,7 +78,7 @@ beforeEach(() => {
 describe("createStagehandRuntime", () => {
   it("forwards a native model config to Stagehand.create", async () => {
     await createStagehandRuntime({
-      cdpUrl: "http://127.0.0.1:59876",
+      credentials: fakeCredentials,
       model: {
         kind: "native",
         modelName: "google/gemini-2.5-flash",
@@ -80,8 +87,14 @@ describe("createStagehandRuntime", () => {
     });
 
     expect(stagehandMocks.connect).toHaveBeenCalledWith({
-      cdpUrl: "http://127.0.0.1:59876",
+      cdpUrl: fakeCredentials.gatewayUrl,
+      headers: { Authorization: `Bearer ${fakeCredentials.bearerToken}` },
+      extensionCdpUrl: fakeCredentials.extensionCdpUrl,
     });
+    const connectOptions = stagehandMocks.connect.mock.calls[0]?.[0] as
+      | { readonly cdpUrl?: string }
+      | undefined;
+    expect(connectOptions?.cdpUrl).not.toContain(fakeCredentials.bearerToken);
     expect(stagehandMocks.create).toHaveBeenCalledWith({
       browser: { connected: true },
       model: {
@@ -98,7 +111,7 @@ describe("createStagehandRuntime", () => {
     }) as unknown as ClientModelGenerate;
 
     await createStagehandRuntime({
-      cdpUrl: "http://127.0.0.1:59876",
+      credentials: fakeCredentials,
       model: { kind: "client", generate },
     });
 

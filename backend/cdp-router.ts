@@ -215,7 +215,6 @@ export function createCdpRouter(
       return;
     }
     isRouterClosed = true;
-    rejectClientRequests("CDP connection closed.");
     rejectControlRequests("CDP connection closed.");
     for (const client of [...clients.values()]) {
       void closeClient(client, "cdp_closed");

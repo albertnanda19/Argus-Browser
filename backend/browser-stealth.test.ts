@@ -1,5 +1,5 @@
 import { createContext, runInContext, type Context } from "node:vm";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCdpLaunchArguments } from "./browser-launcher";
 import {
   buildFingerprintInitScript,
@@ -502,6 +502,10 @@ describe("buildFingerprintInitScript", () => {
 });
 
 describe("installFingerprintHardening", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("enables the page domain before injecting and resuming the target", async () => {
     const fake = createFakeTransport();
     const profile = createFingerprintProfile("p_aaaaaaaaaaaaaaaa");
@@ -573,16 +577,41 @@ describe("installFingerprintHardening", () => {
 
     expect(fake.isClosed).toBe(true);
   });
+
+  it("uses an injected in-process transport without the global WebSocket", async () => {
+    const fake = createFakeTransport();
+    const webSocket = vi.fn(() => {
+      throw new Error("The global WebSocket must not be used.");
+    });
+    vi.stubGlobal("WebSocket", webSocket);
+
+    const hardening = await installFingerprintHardening(
+      { profile: createFingerprintProfile("p_a") },
+      {
+        fetchVersion: async () => ({
+          webSocketDebuggerUrl: "in-process://cdp-router",
+        }),
+        connect: async () => fake.transport,
+      },
+    );
+    await hardening.close();
+
+    expect(webSocket).not.toHaveBeenCalled();
+    expect(fake.isClosed).toBe(true);
+  });
 });
 
 describe("createCdpLaunchArguments", () => {
   it("never relies on --enable-automation", () => {
-    const launchArguments = createCdpLaunchArguments(54321);
+    const launchArguments = createCdpLaunchArguments();
 
-    expect(launchArguments.args).not.toContain("--enable-automation");
-    expect(launchArguments.args).toContain(
+    expect(launchArguments).not.toContain("--enable-automation");
+    expect(launchArguments).toContain(
       "--disable-blink-features=AutomationControlled",
     );
-    expect(launchArguments.ignoreDefaultArgs).toContain("--enable-automation");
+    expect(launchArguments.some((arg) => arg.startsWith("--remote-debugging-port"))).toBe(
+      false,
+    );
+    expect(launchArguments).not.toContain("--remote-allow-origins=*");
   });
 });

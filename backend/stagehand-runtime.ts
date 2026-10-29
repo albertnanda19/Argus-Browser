@@ -2,6 +2,7 @@ import type { ClientLLM } from "@browserbasehq/stagehand" with {
   "resolution-mode": "import",
 };
 import type { z } from "zod";
+import type { CdpCredentials } from "./browser-launcher";
 
 export type ClientModelGenerate = ClientLLM["generate"];
 
@@ -37,7 +38,7 @@ type StagehandInstance = StagehandModule["Stagehand"]["prototype"];
 type StagehandZodSchema = Parameters<StagehandInstance["extract"]>[1];
 
 export type StagehandRuntimeOptions = {
-  readonly cdpUrl: string;
+  readonly credentials: CdpCredentials;
   readonly model: StagehandModelConfig;
 };
 
@@ -210,7 +211,13 @@ function toStagehandModel(model: StagehandModelConfig) {
 
 export const createStagehandRuntime: StagehandRuntimeFactory = async (options) => {
   const { localBrowser, Stagehand } = await import("@browserbasehq/stagehand");
-  const browser = await localBrowser.connect({ cdpUrl: options.cdpUrl });
+  const browser = await localBrowser.connect({
+    cdpUrl: options.credentials.gatewayUrl,
+    headers: {
+      Authorization: `Bearer ${options.credentials.bearerToken}`,
+    },
+    extensionCdpUrl: options.credentials.extensionCdpUrl,
+  });
   const stagehand = await Stagehand.create({
     browser,
     model: toStagehandModel(options.model),
