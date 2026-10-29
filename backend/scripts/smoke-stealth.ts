@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type {
@@ -21,6 +22,11 @@ const FIRST_URL = "data:text/html,<h1>argus-first-page</h1>";
 const STAGEHAND_URL = "data:text/html,<h1>argus-stagehand-page</h1>";
 const FIRST_MARKER = "argus-first-page";
 const STAGEHAND_MARKER = "argus-stagehand-page";
+const HEADER_MARKER = "argus-header-page";
+const BROWSER_TIMEZONE_ID = "Asia/Jakarta";
+const BROWSER_TIMEZONE_OFFSET = -420;
+const BROWSER_LOCALE = "id-ID";
+const BROWSER_ACCEPT_LANGUAGE = "id-ID,id,en";
 const PAGE_TIMEOUT_MS = 10_000;
 const PROCESS_TIMEOUT_MS = 10_000;
 const PROCESS_POLL_MS = 100;
@@ -135,6 +141,7 @@ const PROBE_EXPRESSION = `(() => {
     userAgent: navigator.userAgent,
     platform: navigator.platform,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    timezoneOffset: new Date().getTimezoneOffset(),
     language: navigator.language,
     languages: navigator.languages,
   };
@@ -159,6 +166,7 @@ type FingerprintProbe = {
   readonly userAgent: string;
   readonly platform: string;
   readonly timeZone: string;
+  readonly timezoneOffset: number;
   readonly language: string;
   readonly languages: readonly string[];
 };
@@ -186,6 +194,7 @@ type FingerprintReport = {
   readonly userAgent: string;
   readonly platform: string;
   readonly timeZone: string;
+  readonly timezoneOffset: number;
   readonly language: string;
   readonly languages: readonly string[];
 };
@@ -195,7 +204,10 @@ type LaunchSample = {
   readonly key: string;
   readonly expectedHardwareConcurrency: number;
   readonly first: FingerprintProbe;
+  readonly reload: FingerprintProbe;
+  readonly newPage: FingerprintProbe;
   readonly stagehand: FingerprintProbe | null;
+  readonly acceptLanguageHeaders: readonly string[];
   readonly processCount: number;
   readonly argsHasEnableAutomation: boolean;
   readonly argsHasAutomationControlDisabled: boolean;
@@ -205,11 +217,15 @@ type LaunchSample = {
 
 type LaunchReport = {
   readonly first: FingerprintReport;
+  readonly reload: FingerprintReport;
+  readonly newPage: FingerprintReport;
   readonly stagehand: FingerprintReport | null;
+  readonly acceptLanguageHeaders: readonly string[];
 };
 
 type SmokeReport = {
   readonly ok: boolean;
+  readonly port: number;
   readonly chrome: {
     readonly version: string;
     readonly source: string | null;
@@ -238,7 +254,15 @@ type SmokeState = {
   readonly tempRoot: string;
   readonly appDataDir: string;
   executablePath: string | null;
+  port: number | null;
   readonly profileDirs: string[];
+};
+
+type LocalServer = {
+  readonly url: string;
+  readonly port: number;
+  readonly acceptLanguageHeaders: readonly string[];
+  close(): Promise<void>;
 };
 
 function createTempRoot(): string {
@@ -247,8 +271,52 @@ function createTempRoot(): string {
     workspaceRoot,
     "tmp",
     "testing",
-    `p2-stealth-${randomBytes(4).toString("hex")}`,
+    `stealth-locale-${randomBytes(4).toString("hex")}`,
   );
+}
+
+async function startLocalServer(): Promise<LocalServer> {
+  const acceptLanguageHeaders: string[] = [];
+  const server = createServer((request, response) => {
+    const header = request.headers["accept-language"];
+    if (typeof header === "string") {
+      acceptLanguageHeaders.push(header);
+    }
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(`<h1>${HEADER_MARKER}</h1>`);
+  });
+
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", rejectListen);
+      resolveListen();
+    });
+  });
+
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    await new Promise<void>((resolveClose) => {
+      server.close(() => resolveClose());
+    });
+    throw new Error("Local header server did not expose a TCP port.");
+  }
+
+  return {
+    url: `http://127.0.0.1:${address.port}/${HEADER_MARKER}`,
+    port: address.port,
+    acceptLanguageHeaders,
+    close: () =>
+      new Promise<void>((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error === undefined) {
+            resolveClose();
+          } else {
+            rejectClose(error);
+          }
+        });
+      }),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -396,6 +464,7 @@ function parseProbe(value: unknown): FingerprintProbe {
     userAgent,
     platform,
     timeZone,
+    timezoneOffset,
     language,
     languages,
   } = value;
@@ -418,6 +487,7 @@ function parseProbe(value: unknown): FingerprintProbe {
     typeof userAgent !== "string" ||
     typeof platform !== "string" ||
     typeof timeZone !== "string" ||
+    typeof timezoneOffset !== "number" ||
     typeof language !== "string"
   ) {
     throw new Error("Fingerprint probe returned an invalid shape.");
@@ -462,6 +532,7 @@ function parseProbe(value: unknown): FingerprintProbe {
     userAgent,
     platform,
     timeZone,
+    timezoneOffset,
     language,
     languages: languageList,
   };
@@ -510,6 +581,7 @@ function toFingerprintReport(
     userAgent: probe.userAgent,
     platform: probe.platform,
     timeZone: probe.timeZone,
+    timezoneOffset: probe.timezoneOffset,
     language: probe.language,
     languages: probe.languages,
   };
@@ -540,6 +612,8 @@ async function runLaunch(options: {
   readonly profileDir: string;
   readonly label: string;
   readonly includeStagehandPage: boolean;
+  readonly headerUrl: string;
+  readonly readAcceptLanguageHeaders: () => readonly string[];
 }): Promise<LaunchSample> {
   const expected = createFingerprintProfile(options.profile.id);
   const launched = await launchBrowser({
@@ -593,6 +667,28 @@ async function runLaunch(options: {
     const canvasStableInPage =
       hashCanvas(first.canvasDataUrl) === hashCanvas(firstRepeat.canvasDataUrl);
 
+    await firstStagehandPage.goto(FIRST_URL, { timeout: PAGE_TIMEOUT_MS });
+    const reload = await probePage(firstStagehandPage);
+
+    const headerStart = options.readAcceptLanguageHeaders().length;
+    const newPageHandle = await launched.context.newPage();
+    await newPageHandle.goto(options.headerUrl, { timeout: PAGE_TIMEOUT_MS });
+    await waitForPageUrl(
+      { url: async () => newPageHandle.url() },
+      HEADER_MARKER,
+      PAGE_TIMEOUT_MS,
+    );
+    const acceptLanguageHeaders = options
+      .readAcceptLanguageHeaders()
+      .slice(headerStart);
+    const newPageEvaluate = newPageHandle.evaluate;
+    if (newPageEvaluate === undefined) {
+      throw new Error("New page does not support evaluate.");
+    }
+    const newPageProbe = parseProbe(
+      await Reflect.apply(newPageEvaluate, newPageHandle, [PROBE_EXPRESSION]),
+    );
+
     let stagehandProbe: FingerprintProbe | null = null;
     let stagehandCanvasStable: boolean | null = null;
     if (options.includeStagehandPage) {
@@ -610,7 +706,10 @@ async function runLaunch(options: {
       key: options.profile.id,
       expectedHardwareConcurrency: expected.hardwareConcurrency,
       first,
+      reload,
+      newPage: newPageProbe,
       stagehand: stagehandProbe,
+      acceptLanguageHeaders,
       processCount: processes.length,
       argsHasEnableAutomation,
       argsHasAutomationControlDisabled,
@@ -631,10 +730,19 @@ async function runLaunch(options: {
   }
 }
 
-async function runSmoke(state: SmokeState): Promise<SmokeReport> {
-  const chrome = await resolveUserChrome();
-  state.executablePath = chrome.executablePath;
-
+async function runLaunchSamples(
+  state: SmokeState,
+  executablePath: string,
+  server: LocalServer,
+): Promise<{
+  readonly a1: LaunchSample;
+  readonly a2: LaunchSample;
+  readonly b: LaunchSample;
+}> {
+  await mkdir(state.tempRoot, { recursive: true, mode: 0o700 });
+  await writeFile(join(state.tempRoot, "port.txt"), `${server.port}\n`, {
+    mode: 0o600,
+  });
   await mkdir(state.appDataDir, { recursive: true, mode: 0o700 });
 
   const profileA = await createProfile(state.appDataDir, "Stealth profile A");
@@ -647,36 +755,81 @@ async function runSmoke(state: SmokeState): Promise<SmokeReport> {
 
   console.error("launch A1");
   const a1 = await runLaunch({
-    executablePath: chrome.executablePath,
+    executablePath,
     profile: profileA,
     profileDir: profileDirA,
     label: "A1",
     includeStagehandPage: true,
+    headerUrl: server.url,
+    readAcceptLanguageHeaders: () => server.acceptLanguageHeaders,
   });
 
   console.error("launch A2");
   const a2 = await runLaunch({
-    executablePath: chrome.executablePath,
+    executablePath,
     profile: profileA,
     profileDir: profileDirA,
     label: "A2",
     includeStagehandPage: false,
+    headerUrl: server.url,
+    readAcceptLanguageHeaders: () => server.acceptLanguageHeaders,
   });
 
   console.error("launch B1");
   const b = await runLaunch({
-    executablePath: chrome.executablePath,
+    executablePath,
     profile: profileB,
     profileDir: profileDirB,
     label: "B1",
     includeStagehandPage: false,
+    headerUrl: server.url,
+    readAcceptLanguageHeaders: () => server.acceptLanguageHeaders,
+  });
+
+  return { a1, a2, b };
+}
+
+async function runSmoke(state: SmokeState): Promise<SmokeReport> {
+  const chrome = await resolveUserChrome();
+  state.executablePath = chrome.executablePath;
+
+  const server = await startLocalServer();
+  state.port = server.port;
+
+  const { a1, a2, b } = await runLaunchSamples(
+    state,
+    chrome.executablePath,
+    server,
+  ).finally(async () => {
+    await server.close().catch(() => undefined);
   });
 
   const samples = [a1, a2, b];
-  const nodeTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const chromeMajor = chrome.version.split(".")[0] ?? "";
   const firstPageProbes = samples.map((sample) => sample.first);
+  const reloadProbes = samples.map((sample) => sample.reload);
+  const newPageProbes = samples.map((sample) => sample.newPage);
   const stagehandProbe = a1.stagehand;
+  const allProbes = [
+    ...firstPageProbes,
+    ...reloadProbes,
+    ...newPageProbes,
+    ...(stagehandProbe === null ? [] : [stagehandProbe]),
+  ];
+  const acceptLanguageHeaders = samples.flatMap(
+    (sample) => sample.acceptLanguageHeaders,
+  );
+
+  const isJakartaTimezone = (probe: FingerprintProbe): boolean =>
+    probe.timeZone === BROWSER_TIMEZONE_ID;
+  const isJakartaOffset = (probe: FingerprintProbe): boolean =>
+    probe.timezoneOffset === BROWSER_TIMEZONE_OFFSET;
+  const isIndonesianLocale = (probe: FingerprintProbe): boolean =>
+    probe.language === BROWSER_LOCALE &&
+    probe.languages[0] === BROWSER_LOCALE &&
+    probe.languages[1] === "id";
+  const acceptLanguageTags = (header: string): string[] =>
+    header.split(",").map((part) => part.split(";")[0]?.trim() ?? "");
 
   const hasCanvasShape = (probe: FingerprintProbe): boolean =>
     probe.canvasWidth === CANVAS_WIDTH &&
@@ -691,25 +844,19 @@ async function runSmoke(state: SmokeState): Promise<SmokeReport> {
     automationControlDisabled: samples.every(
       (sample) => sample.argsHasAutomationControlDisabled,
     ),
-    noArgusWindowArtifacts:
-      firstPageProbes.every((probe) => probe.windowArtifacts.length === 0) &&
-      (stagehandProbe === null || stagehandProbe.windowArtifacts.length === 0),
-    nativeNavigatorDescriptors:
-      firstPageProbes.every(
-        (probe) => probe.webdriverGetterNative && probe.hardwareConcurrencyGetterNative,
-      ) &&
-      (stagehandProbe === null ||
-        (stagehandProbe.webdriverGetterNative &&
-          stagehandProbe.hardwareConcurrencyGetterNative)),
-    nativeCanvasMethods:
-      firstPageProbes.every((probe) => probe.canvasMethodsNative) &&
-      (stagehandProbe === null || stagehandProbe.canvasMethodsNative),
-    canvasImageDataStable:
-      firstPageProbes.every((probe) => probe.canvasImageDataStable) &&
-      (stagehandProbe === null || stagehandProbe.canvasImageDataStable),
-    canvasImageDataConsistent:
-      firstPageProbes.every((probe) => probe.canvasImageDataConsistent) &&
-      (stagehandProbe === null || stagehandProbe.canvasImageDataConsistent),
+    noArgusWindowArtifacts: allProbes.every(
+      (probe) => probe.windowArtifacts.length === 0,
+    ),
+    nativeNavigatorDescriptors: allProbes.every(
+      (probe) => probe.webdriverGetterNative && probe.hardwareConcurrencyGetterNative,
+    ),
+    nativeCanvasMethods: allProbes.every((probe) => probe.canvasMethodsNative),
+    canvasImageDataStable: allProbes.every(
+      (probe) => probe.canvasImageDataStable,
+    ),
+    canvasImageDataConsistent: allProbes.every(
+      (probe) => probe.canvasImageDataConsistent,
+    ),
     sameProfileImageDataStable:
       a1.first.canvasImageDataHash === a2.first.canvasImageDataHash &&
       (a1.stagehand === null ||
@@ -761,13 +908,36 @@ async function runSmoke(state: SmokeState): Promise<SmokeReport> {
       }
       return probe.platform.length > 0;
     }),
-    timeZoneMatchesOs: firstPageProbes.every(
-      (probe) => probe.timeZone === nodeTimeZone,
+    timeZoneIsJakarta: allProbes.every(isJakartaTimezone),
+    timezoneOffsetIsJakarta: allProbes.every(isJakartaOffset),
+    languageIsIndonesian: allProbes.every(
+      (probe) => probe.language === BROWSER_LOCALE,
     ),
-    localePresent: firstPageProbes.every(
-      (probe) =>
-        probe.language.length > 0 && probe.languages.includes(probe.language),
-    ),
+    languagesAreIndonesian: allProbes.every(isIndonesianLocale),
+    reloadIdentityApplied:
+      reloadProbes.every(isJakartaTimezone) &&
+      reloadProbes.every(isJakartaOffset) &&
+      reloadProbes.every(isIndonesianLocale),
+    newPageIdentityApplied:
+      newPageProbes.every(isJakartaTimezone) &&
+      newPageProbes.every(isJakartaOffset) &&
+      newPageProbes.every(isIndonesianLocale),
+    stagehandPageIdentityApplied:
+      stagehandProbe !== null &&
+      isJakartaTimezone(stagehandProbe) &&
+      isJakartaOffset(stagehandProbe) &&
+      isIndonesianLocale(stagehandProbe),
+    acceptLanguageIsIndonesian:
+      acceptLanguageHeaders.length > 0 &&
+      acceptLanguageHeaders.every(
+        (header) =>
+          acceptLanguageTags(header).join(",") === BROWSER_ACCEPT_LANGUAGE,
+      ),
+    localeStableAcrossSessions:
+      a1.first.timeZone === a2.first.timeZone &&
+      a1.first.timezoneOffset === a2.first.timezoneOffset &&
+      a1.first.language === a2.first.language &&
+      a1.first.languages.join(",") === a2.first.languages.join(","),
     identityFieldsStable:
       firstPageProbes.every(
         (probe) =>
@@ -786,8 +956,40 @@ async function runSmoke(state: SmokeState): Promise<SmokeReport> {
     ),
   };
 
+  const toLaunchReport = (sample: LaunchSample): LaunchReport => ({
+    first: toFingerprintReport(
+      sample.first,
+      sample.key,
+      sample.argsHasEnableAutomation,
+      sample.argsHasAutomationControlDisabled,
+    ),
+    reload: toFingerprintReport(
+      sample.reload,
+      sample.key,
+      sample.argsHasEnableAutomation,
+      sample.argsHasAutomationControlDisabled,
+    ),
+    newPage: toFingerprintReport(
+      sample.newPage,
+      sample.key,
+      sample.argsHasEnableAutomation,
+      sample.argsHasAutomationControlDisabled,
+    ),
+    stagehand:
+      sample.stagehand === null
+        ? null
+        : toFingerprintReport(
+            sample.stagehand,
+            sample.key,
+            sample.argsHasEnableAutomation,
+            sample.argsHasAutomationControlDisabled,
+          ),
+    acceptLanguageHeaders: sample.acceptLanguageHeaders,
+  });
+
   const report: SmokeReport = {
     ok: Object.values(checks).every(Boolean),
+    port: state.port ?? 0,
     chrome: {
       version: chrome.version,
       source: chrome.source,
@@ -795,45 +997,13 @@ async function runSmoke(state: SmokeState): Promise<SmokeReport> {
     },
     tempRoot: state.tempRoot,
     profiles: {
-      a: profileA.id,
-      b: profileB.id,
+      a: a1.key,
+      b: b.key,
     },
     launches: {
-      a1: {
-        first: toFingerprintReport(
-          a1.first,
-          a1.key,
-          a1.argsHasEnableAutomation,
-          a1.argsHasAutomationControlDisabled,
-        ),
-        stagehand:
-          a1.stagehand === null
-            ? null
-            : toFingerprintReport(
-                a1.stagehand,
-                a1.key,
-                a1.argsHasEnableAutomation,
-                a1.argsHasAutomationControlDisabled,
-              ),
-      },
-      a2: {
-        first: toFingerprintReport(
-          a2.first,
-          a2.key,
-          a2.argsHasEnableAutomation,
-          a2.argsHasAutomationControlDisabled,
-        ),
-        stagehand: null,
-      },
-      b: {
-        first: toFingerprintReport(
-          b.first,
-          b.key,
-          b.argsHasEnableAutomation,
-          b.argsHasAutomationControlDisabled,
-        ),
-        stagehand: null,
-      },
+      a1: toLaunchReport(a1),
+      a2: toLaunchReport(a2),
+      b: toLaunchReport(b),
     },
     checks,
     webgl: {
@@ -874,6 +1044,7 @@ async function main(): Promise<void> {
     tempRoot,
     appDataDir: join(tempRoot, "appdata"),
     executablePath: null,
+    port: null,
     profileDirs: [],
   };
 
@@ -883,6 +1054,7 @@ async function main(): Promise<void> {
   } catch (error) {
     report = {
       ok: false,
+      port: state.port ?? 0,
       chrome: {
         version: "",
         source: null,
@@ -891,9 +1063,9 @@ async function main(): Promise<void> {
       tempRoot: state.tempRoot,
       profiles: { a: "", b: "" },
       launches: {
-        a1: { first: emptyFingerprintReport(), stagehand: null },
-        a2: { first: emptyFingerprintReport(), stagehand: null },
-        b: { first: emptyFingerprintReport(), stagehand: null },
+        a1: emptyLaunchReport(),
+        a2: emptyLaunchReport(),
+        b: emptyLaunchReport(),
       },
       checks: {},
       webgl: {
@@ -945,8 +1117,19 @@ function emptyFingerprintReport(): FingerprintReport {
     userAgent: "",
     platform: "",
     timeZone: "",
+    timezoneOffset: 0,
     language: "",
     languages: [],
+  };
+}
+
+function emptyLaunchReport(): LaunchReport {
+  return {
+    first: emptyFingerprintReport(),
+    reload: emptyFingerprintReport(),
+    newPage: emptyFingerprintReport(),
+    stagehand: null,
+    acceptLanguageHeaders: [],
   };
 }
 

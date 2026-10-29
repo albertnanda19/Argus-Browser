@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 
 const HARDWARE_CONCURRENCY_VALUES = [4, 6, 8, 10, 12, 16] as const;
+const BROWSER_TIMEZONE_ID = "Asia/Jakarta";
+const BROWSER_LOCALE = "id-ID";
+const BROWSER_ACCEPT_LANGUAGE = "id-ID,id,en";
 const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 const DEFAULT_TARGET_ATTACH_TIMEOUT_MS = 3_000;
 const TARGET_POLL_INTERVAL_MS = 10;
@@ -398,6 +401,21 @@ export async function installFingerprintHardening(
       await send(
         "Emulation.setHardwareConcurrencyOverride",
         { hardwareConcurrency: options.profile.hardwareConcurrency },
+        sessionId,
+      );
+      await send(
+        "Emulation.setTimezoneOverride",
+        { timezoneId: BROWSER_TIMEZONE_ID },
+        sessionId,
+      );
+      await send(
+        "Emulation.setLocaleOverride",
+        { locale: BROWSER_LOCALE },
+        sessionId,
+      );
+      await send(
+        "Emulation.setUserAgentOverride",
+        { userAgent: "", acceptLanguage: BROWSER_ACCEPT_LANGUAGE },
         sessionId,
       );
       await send("Page.enable", {}, sessionId);

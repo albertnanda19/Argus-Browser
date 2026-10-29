@@ -280,8 +280,18 @@ function isSentCommand(value: unknown): value is SentCommand {
   );
 }
 
-function createFakeTransport(options: { readonly attach?: boolean } = {}) {
+type FakeTransportOptions = {
+  readonly attach?: boolean;
+  readonly targets?: readonly string[];
+  readonly failCommand?: {
+    readonly method: string;
+    readonly sessionId: string;
+  };
+};
+
+function createFakeTransport(options: FakeTransportOptions = {}) {
   const commands: SentCommand[] = [];
+  const targets = options.targets ?? ["target-1"];
   let onMessage: (message: unknown) => void = () => undefined;
   let isClosed = false;
 
@@ -296,22 +306,37 @@ function createFakeTransport(options: { readonly attach?: boolean } = {}) {
       };
 
       if (message.method === "Target.getTargets") {
-        reply({ targetInfos: [{ type: "page", targetId: "target-1" }] });
+        reply({
+          targetInfos: targets.map((targetId) => ({ type: "page", targetId })),
+        });
         return;
       }
 
       if (message.method === "Target.setAutoAttach") {
         reply({});
         if (message.params.autoAttach === true && options.attach !== false) {
-          onMessage({
-            method: "Target.attachedToTarget",
-            params: {
-              sessionId: "session-1",
-              targetInfo: { type: "page", targetId: "target-1" },
-              waitingForDebugger: false,
-            },
+          targets.forEach((targetId, index) => {
+            onMessage({
+              method: "Target.attachedToTarget",
+              params: {
+                sessionId: `session-${index + 1}`,
+                targetInfo: { type: "page", targetId },
+                waitingForDebugger: false,
+              },
+            });
           });
         }
+        return;
+      }
+
+      if (
+        options.failCommand?.method === message.method &&
+        options.failCommand.sessionId === message.sessionId
+      ) {
+        onMessage({
+          id: message.id,
+          error: { message: "CDP command rejected." },
+        });
         return;
       }
 
@@ -519,20 +544,22 @@ describe("installFingerprintHardening", () => {
     );
     await hardening.close();
 
-    const methods = fake.commands.map((command) => command.method);
-    const automationIndex = methods.indexOf("Emulation.setAutomationOverride");
-    const hardwareIndex = methods.indexOf("Emulation.setHardwareConcurrencyOverride");
-    const enableIndex = methods.indexOf("Page.enable");
-    const injectIndex = methods.indexOf("Page.addScriptToEvaluateOnNewDocument");
-    const resumeIndex = methods.indexOf("Runtime.runIfWaitingForDebugger");
-
-    expect(methods).toContain("Target.getTargets");
-    expect(methods).toContain("Target.setAutoAttach");
-    expect(automationIndex).toBeGreaterThan(-1);
-    expect(hardwareIndex).toBeGreaterThan(automationIndex);
-    expect(enableIndex).toBeGreaterThan(hardwareIndex);
-    expect(injectIndex).toBeGreaterThan(enableIndex);
-    expect(resumeIndex).toBeGreaterThan(injectIndex);
+    expect(
+      fake.commands.map(
+        (command) => `${command.method}:${command.sessionId ?? "browser"}`,
+      ),
+    ).toEqual([
+      "Target.getTargets:browser",
+      "Target.setAutoAttach:browser",
+      "Emulation.setAutomationOverride:session-1",
+      "Emulation.setHardwareConcurrencyOverride:session-1",
+      "Emulation.setTimezoneOverride:session-1",
+      "Emulation.setLocaleOverride:session-1",
+      "Emulation.setUserAgentOverride:session-1",
+      "Page.enable:session-1",
+      "Page.addScriptToEvaluateOnNewDocument:session-1",
+      "Runtime.runIfWaitingForDebugger:session-1",
+    ]);
 
     const automation = fake.commands.find(
       (command) => command.method === "Emulation.setAutomationOverride",
@@ -546,6 +573,27 @@ describe("installFingerprintHardening", () => {
     expect(hardware?.sessionId).toBe("session-1");
     expect(hardware?.params).toEqual({
       hardwareConcurrency: profile.hardwareConcurrency,
+    });
+
+    const timezone = fake.commands.find(
+      (command) => command.method === "Emulation.setTimezoneOverride",
+    );
+    expect(timezone?.sessionId).toBe("session-1");
+    expect(timezone?.params).toEqual({ timezoneId: "Asia/Jakarta" });
+
+    const locale = fake.commands.find(
+      (command) => command.method === "Emulation.setLocaleOverride",
+    );
+    expect(locale?.sessionId).toBe("session-1");
+    expect(locale?.params).toEqual({ locale: "id-ID" });
+
+    const userAgent = fake.commands.find(
+      (command) => command.method === "Emulation.setUserAgentOverride",
+    );
+    expect(userAgent?.sessionId).toBe("session-1");
+    expect(userAgent?.params).toEqual({
+      userAgent: "",
+      acceptLanguage: "id-ID,id,en",
     });
 
     const injection = fake.commands.find(
@@ -575,6 +623,42 @@ describe("installFingerprintHardening", () => {
       ),
     ).rejects.toThrow(/attach/i);
 
+    expect(fake.isClosed).toBe(true);
+  });
+
+  it("keeps hardening other targets when one target rejects an override", async () => {
+    const fake = createFakeTransport({
+      targets: ["target-1", "target-2"],
+      failCommand: {
+        method: "Emulation.setTimezoneOverride",
+        sessionId: "session-1",
+      },
+    });
+
+    await expect(
+      installFingerprintHardening(
+        { cdpUrl: "http://127.0.0.1:54321", profile: createFingerprintProfile("p_a") },
+        {
+          fetchVersion: async () => ({ webSocketDebuggerUrl: "ws://127.0.0.1:54321/devtools/browser" }),
+          connect: async () => fake.transport,
+        },
+      ),
+    ).rejects.toThrow(/rejected/i);
+
+    expect(
+      fake.commands
+        .filter((command) => command.sessionId === "session-2")
+        .map((command) => command.method),
+    ).toEqual([
+      "Emulation.setAutomationOverride",
+      "Emulation.setHardwareConcurrencyOverride",
+      "Emulation.setTimezoneOverride",
+      "Emulation.setLocaleOverride",
+      "Emulation.setUserAgentOverride",
+      "Page.enable",
+      "Page.addScriptToEvaluateOnNewDocument",
+      "Runtime.runIfWaitingForDebugger",
+    ]);
     expect(fake.isClosed).toBe(true);
   });
 
