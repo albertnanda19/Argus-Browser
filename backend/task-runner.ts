@@ -743,6 +743,10 @@ function formatRetryDelay(totalSeconds: number): string {
 
 function reasonForProviderCause(cause: ProviderCause): string | null {
   switch (cause.kind) {
+    case "credits_exhausted":
+      return cause.retryDelaySeconds === null
+        ? "Kredit provider habis. Tambah saldo atau ganti provider."
+        : `Kredit provider habis. Coba lagi sekitar ${formatRetryDelay(cause.retryDelaySeconds)} atau tambah saldo.`;
     case "quota_exhausted":
       return cause.retryDelaySeconds === null
         ? "Kuota provider habis. Coba lagi nanti atau ganti provider."
@@ -764,16 +768,22 @@ function reasonForProviderCause(cause: ProviderCause): string | null {
   }
 }
 
+function providerReasonForAgentError(error: AgentError): string | null {
+  if (error.providerCause === null || !MODEL_WRAPPER_CODES.has(error.code)) {
+    return null;
+  }
+
+  return reasonForProviderCause(error.providerCause);
+}
+
 function reasonForAgentError(error: unknown): string {
   if (!(error instanceof AgentError)) {
     return INTERNAL_REASON;
   }
 
-  if (error.providerCause !== null && MODEL_WRAPPER_CODES.has(error.code)) {
-    const providerReason = reasonForProviderCause(error.providerCause);
-    if (providerReason !== null) {
-      return providerReason;
-    }
+  const providerReason = providerReasonForAgentError(error);
+  if (providerReason !== null) {
+    return providerReason;
   }
 
   switch (error.code) {
@@ -1363,7 +1373,7 @@ class TaskRunnerImpl implements TaskRunner {
         verification: null,
         status: "failed",
       });
-      this.failTask(record, this.snapshotFailureReason(record));
+      this.failTask(record, this.snapshotFailureReason(record, error));
       return "failed";
     }
 
@@ -1502,7 +1512,7 @@ class TaskRunnerImpl implements TaskRunner {
         verification: null,
         status: "failed",
       });
-      this.failTask(record, this.snapshotFailureReason(record));
+      this.failTask(record, this.snapshotFailureReason(record, error));
       return "failed";
     }
 
@@ -1783,10 +1793,14 @@ class TaskRunnerImpl implements TaskRunner {
     return reasonForAgentError(error);
   }
 
-  private snapshotFailureReason(record: RunRecord): string {
-    return this.isSessionReady(record.sessionId)
-      ? "Snapshot halaman gagal."
-      : SESSION_ENDED_REASON;
+  private snapshotFailureReason(record: RunRecord, error: unknown): string {
+    if (!this.isSessionReady(record.sessionId)) {
+      return SESSION_ENDED_REASON;
+    }
+
+    const providerReason =
+      error instanceof AgentError ? providerReasonForAgentError(error) : null;
+    return providerReason ?? "Snapshot halaman gagal.";
   }
 
   private recordStep(input: RecordStepInput): void {

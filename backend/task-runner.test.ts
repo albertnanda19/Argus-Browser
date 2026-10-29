@@ -1163,6 +1163,90 @@ describe("task runner", () => {
     }
   });
 
+  it("reports exhausted credits with a readable retry delay", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_observe_failed", "observe", false, {
+          kind: "credits_exhausted",
+          httpStatus: 402,
+          retryDelaySeconds: 3_661,
+          quotaId: null,
+        });
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Kredit provider habis. Coba lagi sekitar 1 jam 1 menit 1 detik atau tambah saldo.",
+      );
+    }
+  });
+
+  it("reports exhausted credits without a retry delay", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_observe_failed", "observe", false, {
+          kind: "credits_exhausted",
+          httpStatus: 402,
+          retryDelaySeconds: null,
+          quotaId: null,
+        });
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Kredit provider habis. Tambah saldo atau ganti provider.",
+      );
+    }
+  });
+
+  it("reports exhausted credits when the snapshot fallback hits the provider", async () => {
+    const cause: ProviderCause = {
+      kind: "credits_exhausted",
+      httpStatus: 402,
+      retryDelaySeconds: null,
+      quotaId: null,
+    };
+    const fake = createFakeAgent({
+      snapshot: async () => {
+        throw new AgentError("agent_snapshot_failed", "snapshot", false, cause);
+      },
+      extractText: async () => {
+        throw new AgentError("agent_extract_failed", "extract", false, cause);
+      },
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Kredit provider habis. Tambah saldo atau ganti provider.",
+      );
+    }
+    expect(harness.steps.last(task.id)).toMatchObject({
+      action: "snapshot",
+      result: { status: "failed" },
+    });
+  });
+
   it("reports an auth or key rejection", async () => {
     const harness = createRunnerHarness({
       createAgent: async () => {

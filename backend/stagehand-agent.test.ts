@@ -150,6 +150,7 @@ function providerFailure(input: {
   readonly name?: string;
   readonly statusCode?: number;
   readonly responseBody?: string;
+  readonly responseHeaders?: Record<string, string>;
   readonly code?: string;
   readonly cause?: unknown;
 }): Error {
@@ -158,6 +159,9 @@ function providerFailure(input: {
   return Object.assign(error, {
     ...(input.statusCode === undefined ? {} : { statusCode: input.statusCode }),
     ...(input.responseBody === undefined ? {} : { responseBody: input.responseBody }),
+    ...(input.responseHeaders === undefined
+      ? {}
+      : { responseHeaders: input.responseHeaders }),
     ...(input.code === undefined ? {} : { code: input.code }),
     ...(input.cause === undefined ? {} : { cause: input.cause }),
   });
@@ -1024,6 +1028,165 @@ describe("provider cause", () => {
     expect(String(error)).not.toContain(bodyMarker);
     expect(String(error)).not.toContain(FAKE_API_KEY);
     expect(String(error)).not.toContain("RESOURCE_EXHAUSTED");
+
+    await agent.close();
+  });
+
+  it("maps a 402 to credits exhausted without a retry delay or raw body", async () => {
+    const bodyMarker = "raw-credit-body";
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw providerFailure({
+            message: `${bodyMarker} ${FAKE_API_KEY}`,
+            statusCode: 402,
+            responseBody: JSON.stringify({
+              error: { message: "requires more credits" },
+            }),
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(AgentError);
+    expect(error).toMatchObject({
+      code: "agent_observe_failed",
+      providerCause: {
+        kind: "credits_exhausted",
+        httpStatus: 402,
+        retryDelaySeconds: null,
+        quotaId: null,
+      },
+    });
+    expect(String(error)).not.toContain(bodyMarker);
+    expect(String(error)).not.toContain(FAKE_API_KEY);
+    expect(String(error)).not.toContain("requires more credits");
+
+    await agent.close();
+  });
+
+  it("reads a 402 retry delay from the Retry-After header", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw providerFailure({
+            statusCode: 402,
+            responseHeaders: { "Retry-After": "60" },
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: {
+        kind: "credits_exhausted",
+        httpStatus: 402,
+        retryDelaySeconds: 60,
+      },
+    });
+
+    await agent.close();
+  });
+
+  it("maps an OpenRouter budget 403 to credits exhausted", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw providerFailure({
+            statusCode: 403,
+            responseBody: JSON.stringify({
+              error: {
+                code: 403,
+                message: "Key limit exceeded.",
+                metadata: { limit_source: "openrouter_key_limit" },
+              },
+            }),
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: {
+        kind: "credits_exhausted",
+        httpStatus: 403,
+      },
+    });
+
+    await agent.close();
+  });
+
+  it("keeps a 403 without an OpenRouter limit source as an auth or key cause", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw providerFailure({
+            statusCode: 403,
+            responseBody: JSON.stringify({
+              error: { code: 403, message: "Forbidden." },
+            }),
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: { kind: "auth_or_key", httpStatus: 403 },
+    });
+
+    await agent.close();
+  });
+
+  it("reads a credits status within the three level cause chain", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw providerFailure({
+            cause: { cause: { statusCode: 402 } },
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: { kind: "credits_exhausted", httpStatus: 402 },
+    });
+
+    await agent.close();
+  });
+
+  it("ignores a credits status beyond the three level cause chain", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw providerFailure({
+            cause: { cause: { cause: { statusCode: 402 } } },
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: { kind: "unknown", httpStatus: null },
+    });
 
     await agent.close();
   });

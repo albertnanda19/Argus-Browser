@@ -41,6 +41,7 @@ export type AgentErrorCode =
   | "agent_page_not_ready";
 
 export type ProviderCauseKind =
+  | "credits_exhausted"
   | "quota_exhausted"
   | "rate_limited"
   | "auth_or_key"
@@ -99,9 +100,6 @@ const KNOWN_PROVIDER_KEYS = [
   "data",
   "response",
 ] as const;
-const KNOWN_PROVIDER_KEY_SET = new Set(
-  KNOWN_PROVIDER_KEYS.map((key) => normalizeProviderKey(key)),
-);
 
 type ProviderSignals = {
   httpStatus: number | null;
@@ -110,6 +108,7 @@ type ProviderSignals = {
   hasQuota: boolean;
   hasSchema: boolean;
   hasNetworkCode: boolean;
+  hasOpenRouterLimit: boolean;
 };
 
 function normalizeProviderKey(key: string): string {
@@ -132,6 +131,7 @@ function emptyProviderSignals(): ProviderSignals {
     hasQuota: false,
     hasSchema: false,
     hasNetworkCode: false,
+    hasOpenRouterLimit: false,
   };
 }
 
@@ -188,6 +188,13 @@ function inspectProviderScalar(
     if (QUOTA_ID_PATTERN.test(text) && signals.quotaId === null) {
       signals.quotaId = text;
     }
+  }
+
+  if (
+    normalizedKey === "limitsource" &&
+    text.toLowerCase().startsWith("openrouter_")
+  ) {
+    signals.hasOpenRouterLimit = true;
   }
 
   if (RETRY_DELAY_KEYS.has(normalizedKey) && signals.retryDelaySeconds === null) {
@@ -280,10 +287,7 @@ function inspectProviderStructure(
 
   for (const [entryKey, entryValue] of entries) {
     const normalizedKey = normalizeProviderKey(entryKey);
-    if (
-      UNSCANNED_PROVIDER_KEYS.has(normalizedKey) ||
-      KNOWN_PROVIDER_KEY_SET.has(normalizedKey)
-    ) {
+    if (UNSCANNED_PROVIDER_KEYS.has(normalizedKey)) {
       continue;
     }
     inspectProviderStructure(entryValue, entryKey, depth + 1, seen, signals);
@@ -306,14 +310,17 @@ function collectProviderSignals(error: unknown): ProviderSignals {
 }
 
 function resolveProviderKind(signals: ProviderSignals): ProviderCauseKind {
-  if (signals.hasNetworkCode) {
-    return "network";
+  if (signals.httpStatus === 402) {
+    return "credits_exhausted";
   }
-  if (signals.httpStatus === 401 || signals.httpStatus === 403) {
-    return "auth_or_key";
+  if (signals.httpStatus === 403) {
+    return signals.hasOpenRouterLimit ? "credits_exhausted" : "auth_or_key";
   }
   if (signals.httpStatus === 429) {
     return signals.hasQuota ? "quota_exhausted" : "rate_limited";
+  }
+  if (signals.httpStatus === 401) {
+    return "auth_or_key";
   }
   if (
     signals.httpStatus !== null &&
@@ -324,6 +331,9 @@ function resolveProviderKind(signals: ProviderSignals): ProviderCauseKind {
   }
   if (signals.httpStatus === 400 && signals.hasSchema) {
     return "schema_rejected";
+  }
+  if (signals.hasNetworkCode) {
+    return "network";
   }
   return "unknown";
 }
