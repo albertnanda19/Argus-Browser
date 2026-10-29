@@ -359,6 +359,15 @@ function resolveBareDomain(goal: string): string | null {
   return null;
 }
 
+function buildSearchUrl(query: string): string | null {
+  const trimmed = query.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  return `${GOOGLE_SEARCH_URL}${encodeURIComponent(trimmed)}`;
+}
+
 function resolveSearchUrl(goal: string): string | null {
   if (!SEARCH_INTENT_PATTERN.test(goal)) {
     return null;
@@ -373,11 +382,7 @@ function resolveSearchUrl(goal: string): string | null {
     query = stripped;
   }
 
-  if (query.length === 0) {
-    return null;
-  }
-
-  return `${GOOGLE_SEARCH_URL}${encodeURIComponent(query)}`;
+  return buildSearchUrl(query);
 }
 
 export function resolveNavigationTarget(goal: string): string | null {
@@ -1203,8 +1208,10 @@ class TaskRunnerImpl implements TaskRunner {
 
     const page = context.pages().at(-1) ?? (await context.newPage());
     const currentUrl = page.url();
-    const target = resolveNavigationTarget(goal);
     const isEmptyPage = currentUrl.length === 0 || currentUrl === "about:blank";
+    const target =
+      resolveNavigationTarget(goal) ??
+      (isEmptyPage ? buildSearchUrl(goal) : null);
 
     if (target === null) {
       if (!isEmptyPage) {

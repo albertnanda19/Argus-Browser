@@ -2432,7 +2432,89 @@ describe("task runner pre-navigation", () => {
     });
   });
 
-  it("fails when the active page is empty and the goal has no URL", async () => {
+  it("searches from an empty page when the goal has no URL or search keyword", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const goal =
+      "saya ingin anda menganalisa berapa banyak page di landing page dari universitas cakrawala";
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(goal)}`;
+    const task = createTask(harness.tasks, goal);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toEqual([{ url: searchUrl, timeout: 30_000 }]);
+    expect(harness.steps.list(task.id)[0]).toMatchObject({
+      index: 1,
+      action: "navigate",
+      target: searchUrl,
+      result: {
+        status: "done",
+        url: searchUrl,
+        pageChanged: true,
+        verification: {
+          stepOk: true,
+          goalComplete: false,
+          reason: "Halaman berhasil dibuka.",
+        },
+      },
+    });
+  });
+
+  it("keeps an open page when the goal has no URL or search keyword", async () => {
+    const sessions = createFakeSessions();
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(
+      harness.tasks,
+      "saya ingin anda menganalisa berapa banyak page di landing page dari universitas cakrawala",
+    );
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toHaveLength(0);
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+    expect(harness.steps.last(task.id)).toMatchObject({ action: "act" });
+  });
+
+  it("encodes special characters in the fallback search query", async () => {
+    const sessions = createFakeSessions({ initialUrl: "about:blank" });
+    const fake = createFakeAgent();
+    const harness = createRunnerHarness({
+      sessions,
+      createAgent: async () => fake.agent,
+    });
+    const task = createTask(
+      harness.tasks,
+      "Analisa Q&A #2? universitas cakrawala",
+    );
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    expect(sessions.gotoCalls).toEqual([
+      {
+        url: "https://www.google.com/search?q=Analisa%20Q%26A%20%232%3F%20universitas%20cakrawala",
+        timeout: 30_000,
+      },
+    ]);
+  });
+
+  it("fails when the goal is blank on an empty page", async () => {
     const sessions = createFakeSessions({ initialUrl: "about:blank" });
     let isAgentCreated = false;
     const fake = createFakeAgent();
@@ -2443,7 +2525,7 @@ describe("task runner pre-navigation", () => {
         return fake.agent;
       },
     });
-    const task = createTask(harness.tasks, "Buka halaman kontak");
+    const task = createTask(harness.tasks, "   ");
     const terminal = waitForTerminal(harness.events, task.id);
 
     harness.runner.start(task.id);
