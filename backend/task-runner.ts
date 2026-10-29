@@ -1423,18 +1423,86 @@ class TaskRunnerImpl implements TaskRunner {
 
     const action = actions[0];
     if (action === undefined) {
+      const urlAtVerification = this.readUrl(record.sessionId);
+
+      let raw: unknown;
+      try {
+        raw = await this.callAgent(record, () =>
+          agent.extractStructured(
+            buildVerifyInstruction(
+              goal,
+              "Observasi halaman",
+              urlAtVerification,
+              false,
+            ),
+            verificationSchema,
+          ),
+        );
+      } catch (error) {
+        if (error instanceof CancelledError) {
+          throw error;
+        }
+        this.recordStep({
+          record,
+          action: "observe",
+          target: "Observasi halaman",
+          startedAtMs,
+          url: urlAtVerification,
+          pageChanged: false,
+          verification: null,
+          status: "failed",
+        });
+        this.failTask(record, this.failureReason(record, error));
+        return "failed";
+      }
+
+      const parsed = parseVerificationWithDiagnostics(raw);
+      const verification = parsed.verification;
+      if (verification === null) {
+        console.warn(
+          `Verification parse failed: task=${record.taskId} type=${parsed.diagnostics.rawType} length=${parsed.diagnostics.length} fence=${parsed.diagnostics.hasFence} outsideText=${parsed.diagnostics.hasOutsideText} firstChar=${parsed.diagnostics.firstCharClass} candidates=${parsed.diagnostics.objectCandidates} error=${parsed.diagnostics.errorName}`,
+        );
+        this.recordStep({
+          record,
+          action: "observe",
+          target: "Observasi halaman",
+          startedAtMs,
+          url: urlAtVerification,
+          pageChanged: false,
+          verification: null,
+          status: "failed",
+        });
+        this.failTask(record, VERIFICATION_UNREADABLE_REASON);
+        return "failed";
+      }
+
+      if (!verification.stepOk || !verification.goalComplete) {
+        this.recordStep({
+          record,
+          action: "observe",
+          target: "Observasi halaman",
+          startedAtMs,
+          url: urlAtVerification,
+          pageChanged: false,
+          verification,
+          status: "failed",
+        });
+        this.failTask(record, NO_ACTION_REASON);
+        return "failed";
+      }
+
       this.recordStep({
         record,
         action: "observe",
         target: "Observasi halaman",
         startedAtMs,
-        url,
+        url: urlAtVerification,
         pageChanged: false,
-        verification: null,
-        status: "failed",
+        verification,
+        status: "done",
       });
-      this.failTask(record, NO_ACTION_REASON);
-      return "failed";
+      this.completeTask(record, truncate(verification.reason, 500), index);
+      return "completed";
     }
 
     const actionKind = resolveStepAction(action);

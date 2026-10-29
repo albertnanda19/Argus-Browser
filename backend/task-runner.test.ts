@@ -1087,8 +1087,103 @@ describe("task runner", () => {
     }
   });
 
-  it("fails when observation returns no action", async () => {
-    const fake = createFakeAgent({ observe: async () => [] });
+  it("completes when observation returns no action and verification confirms the goal", async () => {
+    const verification: AgentStepVerification = {
+      stepOk: true,
+      goalComplete: true,
+      reason: "Judul halaman sudah terlihat.",
+    };
+    const fake = createFakeAgent({
+      observe: async () => [],
+      extractStructured: async () => verification,
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks, "Sebutkan judul halamannya");
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    if (event.type === "task.completed") {
+      expect(event.result).toEqual({ summary: verification.reason, steps: 1 });
+    }
+    expect(harness.tasks.getTask(task.id)?.status).toBe("completed");
+    expect(fake.state.actCalls).toBe(0);
+    expect(fake.state.structuredExtractCalls).toBe(1);
+    expect(fake.state.verifyInstructions[0]).toContain(
+      "Aksi yang baru dijalankan: Observasi halaman",
+    );
+    expect(fake.state.verifyInstructions[0]).toContain(
+      `URL saat ini: ${pageUrl}`,
+    );
+    expect(fake.state.verifyInstructions[0]).toContain(
+      "Halaman berubah setelah aksi: tidak",
+    );
+    expect(harness.steps.list(task.id)).toHaveLength(1);
+    expect(harness.steps.last(task.id)).toMatchObject({
+      action: "observe",
+      target: "Observasi halaman",
+      result: {
+        status: "done",
+        url: pageUrl,
+        pageChanged: false,
+        verification,
+      },
+    });
+  });
+
+  it.each<[string, AgentStepVerification]>([
+    [
+      "an incomplete goal",
+      { stepOk: true, goalComplete: false, reason: "Belum ada aksi." },
+    ],
+    [
+      "a failed step",
+      { stepOk: false, goalComplete: false, reason: "Tidak ada aksi." },
+    ],
+  ])(
+    "fails with the no-action reason when verification reports %s",
+    async (_label, verification) => {
+      const fake = createFakeAgent({
+        observe: async () => [],
+        extractStructured: async () => verification,
+      });
+      const harness = createRunnerHarness({
+        createAgent: async () => fake.agent,
+      });
+      const task = createTask(harness.tasks);
+      const terminal = waitForTerminal(harness.events, task.id);
+
+      harness.runner.start(task.id);
+      const event = await withDeadline(terminal);
+
+      expect(event.type).toBe("task.failed");
+      if (event.type === "task.failed") {
+        expect(event.reason).toBe(
+          "Agent tidak menemukan aksi untuk langkah ini.",
+        );
+      }
+      expect(fake.state.actCalls).toBe(0);
+      expect(
+        harness.steps.list(task.id).some((step) => step.action === "act"),
+      ).toBe(false);
+      expect(harness.steps.last(task.id)).toMatchObject({
+        action: "observe",
+        result: { status: "failed", verification },
+      });
+    },
+  );
+
+  it("fails readably when verification after an empty observation is unreadable", async () => {
+    const fake = createFakeAgent({
+      observe: async () => [],
+      extractStructured: async () => ({
+        stepOk: "true",
+        goalComplete: false,
+        reason: "ok",
+      }),
+    });
     const harness = createRunnerHarness({ createAgent: async () => fake.agent });
     const task = createTask(harness.tasks);
     const terminal = waitForTerminal(harness.events, task.id);
@@ -1098,13 +1193,106 @@ describe("task runner", () => {
 
     expect(event.type).toBe("task.failed");
     if (event.type === "task.failed") {
-      expect(event.reason).toBe("Agent tidak menemukan aksi untuk langkah ini.");
+      expect(event.reason).toBe("Verifikasi tidak dapat dibaca.");
     }
-    expect(fake.state.actCalls).toBe(0);
     expect(harness.steps.last(task.id)).toMatchObject({
       action: "observe",
-      result: { status: "failed" },
+      result: { status: "failed", verification: null },
     });
+  });
+
+  it("reports the provider cause when verification after an empty observation fails", async () => {
+    const fake = createFakeAgent({
+      observe: async () => [],
+      extractStructured: async () => {
+        throw new AgentError("agent_extract_failed", "extract", false, {
+          kind: "quota_exhausted",
+          httpStatus: 429,
+          retryDelaySeconds: 3_600,
+          quotaId: null,
+        });
+      },
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Kuota provider habis. Coba lagi sekitar 1 jam lagi atau ganti provider.",
+      );
+    }
+    expect(harness.steps.last(task.id)).toMatchObject({
+      action: "observe",
+      result: { status: "failed", verification: null },
+    });
+  });
+
+  it("cancels during verification after an empty observation", async () => {
+    let announceVerification: () => void = () => undefined;
+    const verificationStarted = new Promise<void>((resolve) => {
+      announceVerification = resolve;
+    });
+    const fake = createFakeAgent({
+      observe: async () => [],
+      extractStructured: async () => {
+        announceVerification();
+        return await new Promise<unknown>(() => undefined);
+      },
+    });
+    const harness = createRunnerHarness({ createAgent: async () => fake.agent });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    await withDeadline(verificationStarted);
+
+    harness.tasks.cancelTask(task.id);
+    harness.runner.cancel(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.cancelled");
+    expect(harness.tasks.getTask(task.id)?.status).toBe("cancelled");
+    expect(harness.sessions.get(readySessionId)?.status).toBe("ready");
+    expect(harness.sessions.getCdpUrl(readySessionId)).not.toBeNull();
+    expect(harness.sessions.getCdpCredentials(readySessionId)).not.toBeNull();
+    expect(harness.sessions.contextCloseCalls()).toBe(0);
+    expect(harness.steps.list(task.id)).toHaveLength(0);
+    await vi.waitFor(() => {
+      expect(fake.state.closed).toBe(true);
+    });
+  });
+
+  it("counts an empty observation as one step against the limit", async () => {
+    const fake = createFakeAgent({
+      observe: async () => [],
+      extractStructured: async () => ({
+        stepOk: true,
+        goalComplete: true,
+        reason: "Tujuan tercapai.",
+      }),
+    });
+    const harness = createRunnerHarness({
+      createAgent: async () => fake.agent,
+      maxSteps: 1,
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.completed");
+    if (event.type === "task.completed") {
+      expect(event.result).toEqual({ summary: "Tujuan tercapai.", steps: 1 });
+    }
+    expect(fake.state.observeCalls).toBe(1);
+    expect(fake.state.structuredExtractCalls).toBe(1);
+    expect(harness.steps.list(task.id)).toHaveLength(1);
   });
 
   it("maps a missing provider configuration to a stable reason", async () => {
