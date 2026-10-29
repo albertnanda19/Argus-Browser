@@ -24,6 +24,7 @@ import type { ProviderRegistry } from "./provider-registry";
 import type { ProviderService } from "./provider-service";
 import {
   AgentError,
+  type ProviderCause,
   type StagehandAgent,
 } from "./stagehand-agent";
 import type {
@@ -1091,6 +1092,171 @@ describe("task runner", () => {
       expect(event.reason).toBe("Provider model belum dikonfigurasi.");
     }
     expect(harness.steps.list(task.id)).toHaveLength(0);
+  });
+
+  it("reports quota exhaustion with a readable retry delay", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_observe_failed", "observe", false, {
+          kind: "quota_exhausted",
+          httpStatus: 429,
+          retryDelaySeconds: 20_410,
+          quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+        });
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Kuota provider habis. Coba lagi sekitar 5 jam 40 menit 10 detik lagi atau ganti provider.",
+      );
+    }
+  });
+
+  it("reports quota exhaustion without a retry delay", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_observe_failed", "observe", false, {
+          kind: "quota_exhausted",
+          httpStatus: 429,
+          retryDelaySeconds: null,
+          quotaId: null,
+        });
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Kuota provider habis. Coba lagi nanti atau ganti provider.",
+      );
+    }
+  });
+
+  it("reports an auth or key rejection", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_observe_failed", "observe", false, {
+          kind: "auth_or_key",
+          httpStatus: 401,
+          retryDelaySeconds: null,
+          quotaId: null,
+        });
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Kunci provider ditolak. Periksa konfigurasi provider.");
+    }
+  });
+
+  it.each<[ProviderCause, string]>([
+    [
+      { kind: "rate_limited", httpStatus: 429, retryDelaySeconds: null, quotaId: null },
+      "Provider membatasi permintaan. Coba lagi sebentar lagi.",
+    ],
+    [
+      {
+        kind: "upstream_unavailable",
+        httpStatus: 503,
+        retryDelaySeconds: null,
+        quotaId: null,
+      },
+      "Provider sedang tidak tersedia. Coba lagi nanti.",
+    ],
+    [
+      {
+        kind: "schema_rejected",
+        httpStatus: 400,
+        retryDelaySeconds: null,
+        quotaId: null,
+      },
+      "Model menolak format observasi. Periksa model atau provider.",
+    ],
+    [
+      { kind: "network", httpStatus: null, retryDelaySeconds: null, quotaId: null },
+      "Provider tidak dapat dihubungi.",
+    ],
+    [
+      { kind: "timeout", httpStatus: null, retryDelaySeconds: null, quotaId: null },
+      "Model tidak merespons dalam batas waktu.",
+    ],
+  ])("reports the provider cause %#", async (providerCause, reason) => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_observe_failed", "observe", false, providerCause);
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(reason);
+    }
+  });
+
+  it("keeps the generic reason for an unknown provider cause", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_observe_failed", "observe", false, {
+          kind: "unknown",
+          httpStatus: null,
+          retryDelaySeconds: null,
+          quotaId: null,
+        });
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe("Observasi halaman gagal.");
+    }
+  });
+
+  it("keeps the generic reason for a page that is not ready", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_page_not_ready", "prepare");
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Halaman belum siap untuk agent setelah dimuat ulang.",
+      );
+    }
   });
 
   it("fails when the step limit is reached before the goal", async () => {

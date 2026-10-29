@@ -28,6 +28,8 @@ import type { ProviderService } from "./provider-service";
 import {
   AgentError,
   createStagehandAgent,
+  type AgentErrorCode,
+  type ProviderCause,
   type StagehandAgent,
 } from "./stagehand-agent";
 import type { AgentAction } from "./stagehand-runtime";
@@ -710,9 +712,66 @@ export function parseVerification(
   return parseVerificationWithDiagnostics(raw).verification;
 }
 
+const MODEL_WRAPPER_CODES: ReadonlySet<AgentErrorCode> = new Set([
+  "agent_observe_failed",
+  "agent_act_failed",
+  "agent_extract_failed",
+  "agent_snapshot_failed",
+]);
+
+function formatRetryDelay(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainingSeconds = seconds % 60;
+  const parts: string[] = [];
+
+  if (hours > 0) {
+    parts.push(`${hours} jam`);
+  }
+  if (minutes > 0) {
+    parts.push(`${minutes} menit`);
+  }
+  if (remainingSeconds > 0 || parts.length === 0) {
+    parts.push(`${remainingSeconds} detik`);
+  }
+
+  return parts.join(" ");
+}
+
+function reasonForProviderCause(cause: ProviderCause): string | null {
+  switch (cause.kind) {
+    case "quota_exhausted":
+      return cause.retryDelaySeconds === null
+        ? "Kuota provider habis. Coba lagi nanti atau ganti provider."
+        : `Kuota provider habis. Coba lagi sekitar ${formatRetryDelay(cause.retryDelaySeconds)} lagi atau ganti provider.`;
+    case "rate_limited":
+      return "Provider membatasi permintaan. Coba lagi sebentar lagi.";
+    case "auth_or_key":
+      return "Kunci provider ditolak. Periksa konfigurasi provider.";
+    case "upstream_unavailable":
+      return "Provider sedang tidak tersedia. Coba lagi nanti.";
+    case "schema_rejected":
+      return "Model menolak format observasi. Periksa model atau provider.";
+    case "network":
+      return "Provider tidak dapat dihubungi.";
+    case "timeout":
+      return "Model tidak merespons dalam batas waktu.";
+    case "unknown":
+      return null;
+  }
+}
+
 function reasonForAgentError(error: unknown): string {
   if (!(error instanceof AgentError)) {
     return INTERNAL_REASON;
+  }
+
+  if (error.providerCause !== null && MODEL_WRAPPER_CODES.has(error.code)) {
+    const providerReason = reasonForProviderCause(error.providerCause);
+    if (providerReason !== null) {
+      return providerReason;
+    }
   }
 
   switch (error.code) {

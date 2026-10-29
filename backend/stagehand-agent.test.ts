@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { createStagehandAgent } from "./stagehand-agent";
+import {
+  AgentError,
+  createStagehandAgent,
+  type ProviderCause,
+  type ProviderCauseKind,
+} from "./stagehand-agent";
 import type { ProviderConfig } from "../shared/provider";
 import type { ProviderAdapter, ProviderRegistry } from "./provider-registry";
 import type { ProviderService } from "./provider-service";
@@ -111,6 +116,46 @@ function createRuntime(overrides: Partial<StagehandRuntime> = {}): StagehandRunt
     },
     ...overrides,
   };
+}
+
+const quotaResponseBody = JSON.stringify({
+  error: {
+    code: 429,
+    message: "You exceeded your current quota.",
+    status: "RESOURCE_EXHAUSTED",
+    details: [
+      {
+        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+        violations: [
+          {
+            quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+          },
+        ],
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+        retryDelay: "20410s",
+      },
+    ],
+  },
+});
+
+function providerFailure(input: {
+  readonly message?: string;
+  readonly name?: string;
+  readonly statusCode?: number;
+  readonly responseBody?: string;
+  readonly code?: string;
+  readonly cause?: unknown;
+}): Error {
+  const error = new Error(input.message ?? "provider failure");
+  error.name = input.name ?? "AI_APICallError";
+  return Object.assign(error, {
+    ...(input.statusCode === undefined ? {} : { statusCode: input.statusCode }),
+    ...(input.responseBody === undefined ? {} : { responseBody: input.responseBody }),
+    ...(input.code === undefined ? {} : { code: input.code }),
+    ...(input.cause === undefined ? {} : { cause: input.cause }),
+  });
 }
 
 type AgentFixture = {
@@ -400,6 +445,7 @@ describe("snapshot", () => {
     await expect(agent.snapshot()).rejects.toMatchObject({
       name: "AgentError",
       code: "agent_snapshot_failed",
+      providerCause: null,
     });
 
     await agent.close();
@@ -832,6 +878,7 @@ describe("preparePage", () => {
       code: "agent_page_not_ready",
       operation: "prepare",
       reloaded: true,
+      providerCause: null,
       message: "Agent page is not ready.",
     });
 
@@ -931,6 +978,157 @@ describe("operation failures", () => {
     expect(String(actError)).not.toContain(FAKE_API_KEY);
     expect(String(extractError)).not.toContain(FAKE_API_KEY);
     expect(String(structuredError)).not.toContain(FAKE_API_KEY);
+
+    await agent.close();
+  });
+});
+
+describe("provider cause", () => {
+  it("maps a quota 429 with retry delay and quota id without leaking the body", async () => {
+    const bodyMarker = "raw-provider-body";
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw providerFailure({
+            message: `${bodyMarker} ${FAKE_API_KEY}`,
+            statusCode: 429,
+            responseBody: quotaResponseBody,
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(AgentError);
+    expect(error).toMatchObject({
+      code: "agent_observe_failed",
+      message: "Agent observe failed.",
+      providerCause: {
+        kind: "quota_exhausted",
+        httpStatus: 429,
+        retryDelaySeconds: 20_410,
+        quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+      },
+    });
+    expect(String(error)).not.toContain(bodyMarker);
+    expect(String(error)).not.toContain(FAKE_API_KEY);
+    expect(String(error)).not.toContain("RESOURCE_EXHAUSTED");
+
+    await agent.close();
+  });
+
+  it.each<[string, Error, ProviderCauseKind]>([
+    [
+      "a 429 without a quota signal",
+      providerFailure({ statusCode: 429, message: "Too many requests." }),
+      "rate_limited",
+    ],
+    ["a 401", providerFailure({ statusCode: 401 }), "auth_or_key"],
+    ["a 403", providerFailure({ statusCode: 403 }), "auth_or_key"],
+    ["a 503", providerFailure({ statusCode: 503 }), "upstream_unavailable"],
+    [
+      "a 400 with a response schema signal",
+      providerFailure({ statusCode: 400, message: "Invalid responseSchema payload." }),
+      "schema_rejected",
+    ],
+    ["a network refusal", providerFailure({ code: "ECONNREFUSED" }), "network"],
+    ["an unrecognized failure", providerFailure({}), "unknown"],
+  ])("classifies %s", async (_label, raw, kind) => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw raw;
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      code: "agent_observe_failed",
+      providerCause: { kind },
+    });
+
+    await agent.close();
+  });
+
+  it("reads quota signals from a nested cause", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw providerFailure({
+            statusCode: 429,
+            cause: { responseBody: quotaResponseBody },
+          });
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: {
+        kind: "quota_exhausted",
+        httpStatus: 429,
+        retryDelaySeconds: 20_410,
+        quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+      },
+    });
+
+    await agent.close();
+  });
+
+  it("classifies a timeout as a timeout cause", async () => {
+    const fixture = createFixture({
+      runtime: createRuntime({
+        observe: () => new Promise<readonly AgentAction[]>(() => undefined),
+      }),
+    });
+    const agent = await fixture.createAgent();
+    vi.useFakeTimers();
+
+    const pending = agent.observe("Continue").catch((failure: unknown) => failure);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await pending;
+
+    expect(error).toMatchObject({
+      code: "agent_timeout",
+      providerCause: {
+        kind: "timeout",
+        httpStatus: null,
+        retryDelaySeconds: null,
+        quotaId: null,
+      },
+    });
+
+    await agent.close();
+  });
+
+  it("keeps a provider cause thrown by the runtime", async () => {
+    const cause: ProviderCause = {
+      kind: "quota_exhausted",
+      httpStatus: 429,
+      retryDelaySeconds: 20,
+      quotaId: null,
+    };
+    const original = new AgentError("agent_observe_failed", "observe", false, cause);
+    const fixture = createFixture({
+      runtime: createRuntime({
+        async observe() {
+          throw original;
+        },
+      }),
+    });
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toBe(original);
+    expect(error).toMatchObject({ providerCause: cause });
 
     await agent.close();
   });
