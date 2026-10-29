@@ -1,4 +1,5 @@
 import type { ProviderRegistry } from "./provider-registry";
+import type { ProviderKeyFailureKind } from "./provider-key-pool";
 import type { ProviderService } from "./provider-service";
 import type { CdpCredentials } from "./browser-launcher";
 import {
@@ -38,7 +39,9 @@ export type AgentErrorCode =
   | "agent_observe_failed"
   | "agent_act_failed"
   | "agent_extract_failed"
-  | "agent_page_not_ready";
+  | "agent_page_not_ready"
+  | "agent_provider_keys_cooldown"
+  | "agent_provider_keys_rejected";
 
 export type ProviderCauseKind =
   | "credits_exhausted"
@@ -361,6 +364,8 @@ const AGENT_ERROR_MESSAGES: Record<AgentErrorCode, string> = {
   agent_act_failed: "Agent act failed.",
   agent_extract_failed: "Agent extract failed.",
   agent_page_not_ready: "Agent page is not ready.",
+  agent_provider_keys_cooldown: "All provider keys are cooling down.",
+  agent_provider_keys_rejected: "All provider keys were rejected.",
 };
 
 export class AgentError extends Error {
@@ -368,12 +373,14 @@ export class AgentError extends Error {
   readonly operation: AgentOperation | null;
   readonly reloaded: boolean;
   readonly providerCause: ProviderCause | null;
+  readonly retryAfterSeconds: number | null;
 
   constructor(
     code: AgentErrorCode,
     operation: AgentOperation | null = null,
     reloaded = false,
     providerCause: ProviderCause | null = null,
+    retryAfterSeconds: number | null = null,
   ) {
     super(AGENT_ERROR_MESSAGES[code]);
     this.name = "AgentError";
@@ -381,6 +388,7 @@ export class AgentError extends Error {
     this.operation = operation;
     this.reloaded = reloaded;
     this.providerCause = providerCause;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -436,10 +444,15 @@ function runOperation<T>(operation: () => Promise<T>): Promise<T> {
 
 class StagehandAgentImpl implements StagehandAgent {
   private readonly runtime: StagehandRuntime;
+  private readonly onProviderFailure: (cause: ProviderCause) => void;
   private closePromise: Promise<void> | null = null;
 
-  constructor(runtime: StagehandRuntime) {
+  constructor(
+    runtime: StagehandRuntime,
+    onProviderFailure: (cause: ProviderCause) => void = () => undefined,
+  ) {
     this.runtime = runtime;
+    this.onProviderFailure = onProviderFailure;
   }
 
   async snapshot(options?: {
@@ -598,7 +611,23 @@ class StagehandAgentImpl implements StagehandAgent {
       });
     }
 
-    return new AgentError(failureCode, operation, false, classifyProviderCause(error));
+    const providerCause = classifyProviderCause(error);
+    this.onProviderFailure(providerCause);
+    return new AgentError(failureCode, operation, false, providerCause);
+  }
+}
+
+function toKeyFailureKind(
+  kind: ProviderCauseKind,
+): ProviderKeyFailureKind | null {
+  switch (kind) {
+    case "quota_exhausted":
+    case "rate_limited":
+    case "credits_exhausted":
+    case "auth_or_key":
+      return kind;
+    default:
+      return null;
   }
 }
 
@@ -615,9 +644,23 @@ export async function createStagehandAgent(
     throw new AgentError("agent_provider_unsupported");
   }
 
+  const selection = options.providers.acquireKey(active.provider);
+  if (selection.status === "cooldown") {
+    throw new AgentError(
+      "agent_provider_keys_cooldown",
+      null,
+      false,
+      null,
+      selection.retryAfterSeconds,
+    );
+  }
+  if (selection.status === "rejected") {
+    throw new AgentError("agent_provider_keys_rejected");
+  }
+
   const model = adapter.createModelConfig({
     model: active.model,
-    apiKey: active.apiKey,
+    apiKey: selection.apiKey,
   });
   const createRuntime = options.createRuntime ?? createStagehandRuntime;
   const runtimePromise = runOperation(() =>
@@ -629,7 +672,17 @@ export async function createStagehandAgent(
 
   try {
     const runtime = await withTimeout(runtimePromise, INIT_TIMEOUT_MS);
-    return new StagehandAgentImpl(runtime);
+    return new StagehandAgentImpl(runtime, (cause) => {
+      const kind = toKeyFailureKind(cause.kind);
+      if (kind !== null) {
+        options.providers.markKeyFailure(
+          active.provider,
+          selection.keyId,
+          kind,
+          cause.retryDelaySeconds,
+        );
+      }
+    });
   } catch (error) {
     void runtimePromise
       .then((lateRuntime) =>

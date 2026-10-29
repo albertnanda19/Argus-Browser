@@ -33,12 +33,12 @@ const twoConfigs: StoredProviderFile = {
   configs: {
     gemini: {
       model: "gemini-2.5-flash",
-      apiKey: geminiKey,
+      apiKeys: [geminiKey],
       updatedAt,
     },
     openrouter: {
       model: "nvidia/nemotron-3.5-super-vl:free",
-      apiKey: openRouterKey,
+      apiKeys: [openRouterKey],
       updatedAt,
     },
   },
@@ -90,7 +90,11 @@ describe("provider store", () => {
       config: {
         active: "gemini",
         configs: {
-          gemini: { model: "gemini-2.5-flash", apiKey: geminiKey, updatedAt },
+          gemini: {
+            model: "gemini-2.5-flash",
+            apiKeys: [geminiKey],
+            updatedAt,
+          },
         },
       },
     });
@@ -105,8 +109,36 @@ describe("provider store", () => {
     expect(contents).toEqual({
       active: "gemini",
       configs: {
-        gemini: { model: "gemini-2.5-flash", apiKey: geminiKey, updatedAt },
+        gemini: {
+          model: "gemini-2.5-flash",
+          apiKeys: [geminiKey],
+          updatedAt,
+        },
       },
+    });
+  });
+
+  it("migrates a multi-provider entry with a single apiKey to a one-key pool", async () => {
+    const appDataDir = newAppDataDir();
+    await mkdir(appDataDir, { recursive: true });
+    await writeFile(
+      providerFile(appDataDir),
+      JSON.stringify({
+        active: "openrouter",
+        configs: {
+          gemini: { model: "gemini-2.5-flash", apiKey: geminiKey, updatedAt },
+          openrouter: {
+            model: "nvidia/nemotron-3.5-super-vl:free",
+            apiKey: openRouterKey,
+            updatedAt,
+          },
+        },
+      }),
+    );
+
+    await expect(readStoredProviderConfig(appDataDir)).resolves.toEqual({
+      status: "ok",
+      config: twoConfigs,
     });
   });
 

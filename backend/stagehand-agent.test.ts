@@ -8,6 +8,7 @@ import {
 } from "./stagehand-agent";
 import type { ProviderConfig } from "../shared/provider";
 import type { ProviderAdapter, ProviderRegistry } from "./provider-registry";
+import { providerKeyId } from "./provider-key-pool";
 import type { ProviderService } from "./provider-service";
 import type { StoredProviderConfig } from "./provider-store";
 import { createOpenRouterGenerate } from "./openrouter-provider";
@@ -33,13 +34,19 @@ function activeConfig(overrides: Partial<StoredProviderConfig> = {}): StoredProv
   return {
     provider: "gemini",
     model: "gemini-2.5-flash",
-    apiKey: FAKE_API_KEY,
+    apiKeys: [FAKE_API_KEY],
     updatedAt: UPDATED_AT,
     ...overrides,
   };
 }
 
-function createProviderService(getActive: () => StoredProviderConfig | null): ProviderService {
+function createProviderService(
+  getActive: () => StoredProviderConfig | null,
+  overrides: {
+    readonly acquireKey?: ProviderService["acquireKey"];
+    readonly markKeyFailure?: ProviderService["markKeyFailure"];
+  } = {},
+): ProviderService {
   return {
     getConfig(): ProviderConfig {
       const active = getActive();
@@ -50,6 +57,7 @@ function createProviderService(getActive: () => StoredProviderConfig | null): Pr
             configured: false,
             updatedAt: null,
             available: [],
+            keys: [],
           }
         : {
             provider: active.provider,
@@ -57,9 +65,29 @@ function createProviderService(getActive: () => StoredProviderConfig | null): Pr
             configured: true,
             updatedAt: active.updatedAt,
             available: [active.provider],
+            keys: active.apiKeys.map((apiKey) => ({
+              id: providerKeyId(apiKey),
+              status: "ready",
+              cooldownUntil: null,
+              lastUsedAt: null,
+            })),
           };
     },
     getActive,
+    acquireKey(provider) {
+      if (overrides.acquireKey !== undefined) {
+        return overrides.acquireKey(provider);
+      }
+      const active = getActive();
+      const apiKey = active?.apiKeys[0];
+      if (apiKey === undefined) {
+        return { status: "rejected" };
+      }
+      return { status: "selected", keyId: providerKeyId(apiKey), apiKey };
+    },
+    markKeyFailure(provider, keyId, kind, retryDelaySeconds) {
+      overrides.markKeyFailure?.(provider, keyId, kind, retryDelaySeconds);
+    },
     async setConfig() {
       throw new Error("Unused provider service write.");
     },
@@ -325,15 +353,16 @@ describe("createStagehandAgent", () => {
   });
 
   it("reads the active provider configuration on every factory call", async () => {
-    const configs = [
-      activeConfig({ model: "gemini-2.5-flash", apiKey: "first-key" }),
-      activeConfig({ model: "gemini-2.5-pro", apiKey: "second-key" }),
-    ];
+    let current = activeConfig({
+      model: "gemini-2.5-flash",
+      apiKeys: ["first-key"],
+    });
     const fixture = createFixture({
-      getActive: () => configs.shift() ?? null,
+      getActive: () => current,
     });
 
     const first = await fixture.createAgent();
+    current = activeConfig({ model: "gemini-2.5-pro", apiKeys: ["second-key"] });
     const second = await fixture.createAgent();
 
     expect(fixture.runtimeOptions).toEqual([
@@ -357,6 +386,103 @@ describe("createStagehandAgent", () => {
 
     await first.close();
     await second.close();
+  });
+
+  it("fails with a cooldown error when every key is cooling down", async () => {
+    const createRuntime = vi.fn<StagehandRuntimeFactory>();
+
+    const failure = await createStagehandAgent({
+      credentials: FAKE_CREDENTIALS,
+      providers: createProviderService(() => activeConfig(), {
+        acquireKey: () => ({ status: "cooldown", retryAfterSeconds: 125 }),
+      }),
+      registry: createRegistry(geminiAdapter),
+      createRuntime,
+    }).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      name: "AgentError",
+      code: "agent_provider_keys_cooldown",
+      message: "All provider keys are cooling down.",
+      retryAfterSeconds: 125,
+    });
+    expect(String(failure)).not.toContain(FAKE_API_KEY);
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it("fails with a rejected error when every key failed auth", async () => {
+    const createRuntime = vi.fn<StagehandRuntimeFactory>();
+
+    const failure = await createStagehandAgent({
+      credentials: FAKE_CREDENTIALS,
+      providers: createProviderService(() => activeConfig(), {
+        acquireKey: () => ({ status: "rejected" }),
+      }),
+      registry: createRegistry(geminiAdapter),
+      createRuntime,
+    }).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      name: "AgentError",
+      code: "agent_provider_keys_rejected",
+      message: "All provider keys were rejected.",
+    });
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  it("marks the selected key when a provider call is rate limited", async () => {
+    const keyId = providerKeyId(FAKE_API_KEY);
+    const marks: {
+      readonly provider: string;
+      readonly keyId: string;
+      readonly kind: string;
+      readonly retryDelaySeconds: number | null;
+    }[] = [];
+    const runtime = createRuntime({
+      async observe() {
+        throw providerFailure({
+          statusCode: 429,
+          responseBody: quotaResponseBody,
+        });
+      },
+    });
+    const agent = await createStagehandAgent({
+      credentials: FAKE_CREDENTIALS,
+      providers: createProviderService(() => activeConfig(), {
+        acquireKey: () => ({ status: "selected", keyId, apiKey: FAKE_API_KEY }),
+        markKeyFailure(provider, failedKeyId, kind, retryDelaySeconds) {
+          marks.push({
+            provider,
+            keyId: failedKeyId,
+            kind,
+            retryDelaySeconds,
+          });
+        },
+      }),
+      registry: createRegistry(geminiAdapter),
+      createRuntime: async () => runtime,
+    });
+
+    const failure = await agent.observe("Find the submit button").catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      name: "AgentError",
+      code: "agent_observe_failed",
+      providerCause: { kind: "quota_exhausted", retryDelaySeconds: 20_410 },
+    });
+    expect(marks).toEqual([
+      {
+        provider: "gemini",
+        keyId,
+        kind: "quota_exhausted",
+        retryDelaySeconds: 20_410,
+      },
+    ]);
+    expect(JSON.stringify(marks)).not.toContain(FAKE_API_KEY);
+
+    await agent.close();
   });
 
   it("times out initialization after sixty seconds", async () => {

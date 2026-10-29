@@ -25,6 +25,7 @@ const unconfigured: ProviderConfig = {
   configured: false,
   updatedAt: null,
   available: [],
+  keys: [],
 };
 
 const configured: ProviderConfig = {
@@ -33,6 +34,7 @@ const configured: ProviderConfig = {
   configured: true,
   updatedAt: fixedNow,
   available: ["gemini"],
+  keys: [],
 };
 
 const readyState: ChromeInstallerState = {
@@ -88,6 +90,7 @@ function createHarness(initial: ProviderConfig = unconfigured) {
         configured: true,
         updatedAt: fixedNow,
         available: providerIdSchema.options.filter((id) => available.has(id)),
+        keys: config.keys,
       };
       return config;
     }),
@@ -165,6 +168,7 @@ describe("GET /v1/providers", () => {
     expect(Object.keys(body.data).sort()).toEqual([
       "available",
       "configured",
+      "keys",
       "model",
       "provider",
       "updatedAt",
@@ -200,6 +204,7 @@ describe("PUT /v1/providers", () => {
     expect(Object.keys(body.data).sort()).toEqual([
       "available",
       "configured",
+      "keys",
       "model",
       "provider",
       "updatedAt",
@@ -209,6 +214,81 @@ describe("PUT /v1/providers", () => {
       model: "gemini-2.5-flash",
       apiKey,
     });
+  });
+
+  it("accepts an apiKeys pool and forwards it to the service", async () => {
+    const { app, providers } = createHarness();
+    const response = await app.request(
+      "/v1/providers",
+      jsonBody("PUT", {
+        provider: "gemini",
+        model: "gemini-2.5-flash",
+        apiKeys: ["  first-key  ", "second-key"],
+      }),
+    );
+    const body = (await response.json()) as { data: ProviderConfig };
+
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(body)).not.toContain("first-key");
+    expect(providers.setConfig).toHaveBeenCalledWith({
+      provider: "gemini",
+      model: "gemini-2.5-flash",
+      apiKeys: ["first-key", "second-key"],
+    });
+  });
+
+  it.each([
+    {
+      provider: "gemini",
+      model: "gemini-2.5-flash",
+      apiKey,
+      apiKeys: [apiKey],
+    },
+    { provider: "gemini", model: "gemini-2.5-flash", apiKeys: [] },
+    {
+      provider: "gemini",
+      model: "gemini-2.5-flash",
+      apiKeys: Array.from({ length: 21 }, (_, index) => `key-${index}`),
+    },
+    {
+      provider: "gemini",
+      model: "gemini-2.5-flash",
+      apiKeys: ["   "],
+    },
+  ])("rejects an invalid key pool %j with 400", async (body) => {
+    const { app, providers } = createHarness();
+    const response = await app.request("/v1/providers", jsonBody("PUT", body));
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toContain("application/problem+json");
+    expect(providers.setConfig).not.toHaveBeenCalled();
+  });
+
+  it("returns the key pool metadata without key material", async () => {
+    const { app, setConfig } = createHarness();
+    const keys = [
+      {
+        id: "k_0123456789ab",
+        status: "cooldown" as const,
+        cooldownUntil: "2026-10-25T11:00:00.000Z",
+        lastUsedAt: fixedNow,
+      },
+    ];
+    setConfig({
+      provider: "gemini",
+      model: "gemini-2.5-flash",
+      configured: true,
+      updatedAt: fixedNow,
+      available: ["gemini"],
+      keys,
+    });
+
+    const response = await app.request("/v1/providers", withAuth());
+    const body = (await response.json()) as { data: ProviderConfig };
+
+    expect(response.status).toBe(200);
+    expect(body.data.keys).toEqual(keys);
+    expect(JSON.stringify(body)).not.toContain(apiKey);
   });
 
   it("stores OpenRouter next to the saved Gemini configuration", async () => {
@@ -230,6 +310,7 @@ describe("PUT /v1/providers", () => {
       configured: true,
       updatedAt: fixedNow,
       available: ["gemini", "openrouter"],
+      keys: [],
     });
     expect(JSON.stringify(body)).not.toContain(apiKey);
     expect(providers.setConfig).toHaveBeenCalledWith({
@@ -254,6 +335,7 @@ describe("PUT /v1/providers", () => {
       configured: true,
       updatedAt: fixedNow,
       available: ["gemini"],
+      keys: [],
     });
     expect(providers.setConfig).toHaveBeenCalledWith({
       provider: "gemini",

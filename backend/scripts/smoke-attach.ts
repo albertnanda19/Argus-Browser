@@ -19,6 +19,7 @@ import {
   resolveProfileDir,
 } from "../profile-store";
 import { createProviderRegistry } from "../provider-registry";
+import { providerKeyId } from "../provider-key-pool";
 import type { ProviderService } from "../provider-service";
 import type { StoredProviderConfig } from "../provider-store";
 import { createStagehandAgent, type StagehandAgent } from "../stagehand-agent";
@@ -194,7 +195,7 @@ function createSmokeProviders(): ProviderService {
   const config: StoredProviderConfig = {
     provider: "gemini",
     model: "smoke-model",
-    apiKey: SMOKE_API_KEY,
+    apiKeys: [SMOKE_API_KEY],
     updatedAt: new Date(0).toISOString(),
   };
 
@@ -205,8 +206,17 @@ function createSmokeProviders(): ProviderService {
       configured: true,
       updatedAt: config.updatedAt,
       available: ["gemini"],
+      keys: [],
     }),
     getActive: () => ({ ...config }),
+    acquireKey: () => ({
+      status: "selected",
+      keyId: providerKeyId(SMOKE_API_KEY),
+      apiKey: SMOKE_API_KEY,
+    }),
+    markKeyFailure() {
+      return undefined;
+    },
     async setConfig() {
       throw new Error("Smoke provider configuration is read-only.");
     },

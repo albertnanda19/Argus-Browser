@@ -813,6 +813,10 @@ function reasonForAgentError(error: unknown): string {
       return PAGE_NOT_READY_REASON;
     case "agent_closed":
       return "Agent sudah ditutup.";
+    case "agent_provider_keys_cooldown":
+      return `Semua kunci provider sedang dibatasi. Coba lagi setelah ${formatRetryDelay(error.retryAfterSeconds ?? 0)}.`;
+    case "agent_provider_keys_rejected":
+      return "Semua kunci provider ditolak. Periksa konfigurasi provider.";
   }
 }
 

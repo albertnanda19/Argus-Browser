@@ -6,17 +6,26 @@ import {
   providerApiKeySchema,
   providerIdSchema,
   providerModelSchema,
+  type ProviderId,
 } from "../shared/provider";
 
 export const PROVIDER_CONFIG_FILE = "providers.json";
 
 export const storedProviderEntrySchema = z.strictObject({
   model: providerModelSchema,
-  apiKey: providerApiKeySchema,
+  apiKeys: z.array(providerApiKeySchema).min(1).max(20),
   updatedAt: z.iso.datetime({ offset: false }),
 });
 
 export type StoredProviderEntry = z.infer<typeof storedProviderEntrySchema>;
+
+const legacyStoredProviderEntrySchema = z.strictObject({
+  model: providerModelSchema,
+  apiKey: providerApiKeySchema,
+  updatedAt: z.iso.datetime({ offset: false }),
+});
+
+type LegacyStoredProviderEntry = z.infer<typeof legacyStoredProviderEntrySchema>;
 
 export const storedProviderFileSchema = z
   .strictObject({
@@ -38,14 +47,29 @@ export const storedProviderFileSchema = z
 
 export type StoredProviderFile = z.infer<typeof storedProviderFileSchema>;
 
-export const storedProviderConfigSchema = z.strictObject({
+const legacyStoredProviderFileSchema = z.strictObject({
+  active: providerIdSchema,
+  configs: z.strictObject({
+    gemini: legacyStoredProviderEntrySchema.optional(),
+    openrouter: legacyStoredProviderEntrySchema.optional(),
+  }),
+});
+
+const storedProviderConfigSchema = z.strictObject({
   provider: providerIdSchema,
   model: providerModelSchema,
   apiKey: providerApiKeySchema,
   updatedAt: z.iso.datetime({ offset: false }),
 });
 
-export type StoredProviderConfig = z.infer<typeof storedProviderConfigSchema>;
+export const storedActiveProviderSchema = z.strictObject({
+  provider: providerIdSchema,
+  model: providerModelSchema,
+  apiKeys: z.array(providerApiKeySchema).min(1).max(20),
+  updatedAt: z.iso.datetime({ offset: false }),
+});
+
+export type StoredProviderConfig = z.infer<typeof storedActiveProviderSchema>;
 
 export type ProviderConfigRead =
   | { readonly status: "missing" }
@@ -56,17 +80,46 @@ function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
-function migrateLegacyConfig(config: StoredProviderConfig): StoredProviderFile {
+function migrateEntry(entry: LegacyStoredProviderEntry): StoredProviderEntry {
+  return {
+    model: entry.model,
+    apiKeys: [entry.apiKey],
+    updatedAt: entry.updatedAt,
+  };
+}
+
+function migrateLegacyConfig(
+  config: z.infer<typeof storedProviderConfigSchema>,
+): StoredProviderFile {
   return {
     active: config.provider,
     configs: {
-      [config.provider]: {
-        model: config.model,
-        apiKey: config.apiKey,
-        updatedAt: config.updatedAt,
-      },
+      [config.provider]: migrateEntry(config),
     },
   };
+}
+
+function migrateLegacyFile(config: {
+  readonly active: ProviderId;
+  readonly configs: {
+    readonly gemini?: LegacyStoredProviderEntry;
+    readonly openrouter?: LegacyStoredProviderEntry;
+  };
+}): StoredProviderFile | null {
+  const configs: StoredProviderFile["configs"] = {};
+
+  for (const id of providerIdSchema.options) {
+    const entry = config.configs[id];
+    if (entry !== undefined) {
+      configs[id] = migrateEntry(entry);
+    }
+  }
+
+  if (configs[config.active] === undefined) {
+    return null;
+  }
+
+  return { active: config.active, configs };
 }
 
 export async function readStoredProviderConfig(
@@ -90,6 +143,14 @@ export async function readStoredProviderConfig(
   const current = storedProviderFileSchema.safeParse(value);
   if (current.success) {
     return { status: "ok", config: current.data };
+  }
+
+  const legacyFile = legacyStoredProviderFileSchema.safeParse(value);
+  if (legacyFile.success) {
+    const migrated = migrateLegacyFile(legacyFile.data);
+    if (migrated !== null) {
+      return { status: "ok", config: migrated };
+    }
   }
 
   const legacy = storedProviderConfigSchema.safeParse(value);

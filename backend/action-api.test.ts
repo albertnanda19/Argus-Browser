@@ -197,6 +197,7 @@ function createHarness(options: HarnessOptions = {}) {
         configured: false,
         updatedAt: null,
         available: [],
+        keys: [],
       }),
       setConfig: async () => {
         throw new Error("Unused provider update.");

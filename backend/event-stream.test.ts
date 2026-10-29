@@ -85,6 +85,7 @@ function createHarness(heartbeatMs = 60_000): Harness {
         configured: false,
         updatedAt: null,
         available: [],
+        keys: [],
       }),
       setConfig: async () => {
         throw new Error("Unused provider update.");

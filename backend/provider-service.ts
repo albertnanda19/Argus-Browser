@@ -4,8 +4,16 @@ import {
   type ProviderConfig,
   type ProviderConfigRequest,
   type ProviderId,
+  type ProviderKeyState,
 } from "../shared/provider";
 import { ProviderError } from "./provider-errors";
+import {
+  createProviderKeyPool,
+  normalizeProviderApiKeys,
+  type ProviderKeyFailureKind,
+  type ProviderKeyPool,
+  type ProviderKeySelection,
+} from "./provider-key-pool";
 import type { ProviderRegistry } from "./provider-registry";
 import {
   readStoredProviderConfig,
@@ -18,6 +26,13 @@ import {
 export type ProviderService = {
   getConfig(): ProviderConfig;
   getActive(): StoredProviderConfig | null;
+  acquireKey(provider: ProviderId): ProviderKeySelection;
+  markKeyFailure(
+    provider: ProviderId,
+    keyId: string,
+    kind: ProviderKeyFailureKind,
+    retryDelaySeconds: number | null,
+  ): void;
   setConfig(input: ProviderConfigRequest): Promise<ProviderConfig>;
 };
 
@@ -37,7 +52,10 @@ function availableProviders(state: StoredProviderFile | null): ProviderId[] {
   );
 }
 
-function toPublicConfig(state: StoredProviderFile | null): ProviderConfig {
+function toPublicConfig(
+  state: StoredProviderFile | null,
+  keys: ProviderKeyState[],
+): ProviderConfig {
   if (state === null) {
     return {
       provider: null,
@@ -45,6 +63,7 @@ function toPublicConfig(state: StoredProviderFile | null): ProviderConfig {
       configured: false,
       updatedAt: null,
       available: [],
+      keys: [],
     };
   }
 
@@ -56,10 +75,13 @@ function toPublicConfig(state: StoredProviderFile | null): ProviderConfig {
     configured: entry !== undefined,
     updatedAt: entry?.updatedAt ?? null,
     available: availableProviders(state),
+    keys,
   };
 }
 
-function toActiveConfig(state: StoredProviderFile | null): StoredProviderConfig | null {
+function toActiveConfig(
+  state: StoredProviderFile | null,
+): StoredProviderConfig | null {
   if (state === null) {
     return null;
   }
@@ -69,7 +91,12 @@ function toActiveConfig(state: StoredProviderFile | null): StoredProviderConfig 
     return null;
   }
 
-  return { provider: state.active, ...entry };
+  return {
+    provider: state.active,
+    model: entry.model,
+    apiKeys: [...entry.apiKeys],
+    updatedAt: entry.updatedAt,
+  };
 }
 
 export async function createProviderService(
@@ -84,10 +111,35 @@ export async function createProviderService(
   let state = read.status === "ok" ? read.config : null;
   let writeTail: Promise<unknown> = Promise.resolve();
   const now = options.now ?? (() => new Date());
+  const keyPools = new Map<ProviderId, ProviderKeyPool>();
+
+  if (state !== null) {
+    for (const id of providerIdSchema.options) {
+      const entry = state.configs[id];
+      if (entry !== undefined) {
+        keyPools.set(id, createProviderKeyPool(entry.apiKeys, { now }));
+      }
+    }
+  }
+
+  const keysFor = (provider: ProviderId | null): ProviderKeyState[] => {
+    if (provider === null) {
+      return [];
+    }
+
+    return [...(keyPools.get(provider)?.list() ?? [])];
+  };
 
   return {
-    getConfig: () => toPublicConfig(state),
+    getConfig: () => toPublicConfig(state, keysFor(state?.active ?? null)),
     getActive: () => toActiveConfig(state),
+    acquireKey(provider) {
+      const pool = keyPools.get(provider);
+      return pool?.select() ?? { status: "rejected" };
+    },
+    markKeyFailure(provider, keyId, kind, retryDelaySeconds) {
+      keyPools.get(provider)?.markFailure(keyId, kind, retryDelaySeconds);
+    },
     setConfig(input) {
       const run = async (): Promise<ProviderConfig> => {
         const request = providerConfigRequestSchema.parse(input);
@@ -98,24 +150,32 @@ export async function createProviderService(
         }
 
         const stored = state?.configs[adapter.id];
-        const apiKey = request.apiKey ?? stored?.apiKey;
+        const explicitApiKeys =
+          request.apiKeys ??
+          (request.apiKey === undefined ? null : [request.apiKey]);
+        const apiKeys =
+          explicitApiKeys === null
+            ? stored?.apiKeys
+            : normalizeProviderApiKeys(explicitApiKeys);
 
-        if (apiKey === undefined) {
+        if (apiKeys === undefined) {
           throw new ProviderError("provider_api_key_required");
         }
 
-        const validation = await adapter.validateCredentials({
-          model: request.model,
-          apiKey,
-        });
+        for (const apiKey of apiKeys) {
+          const validation = await adapter.validateCredentials({
+            model: request.model,
+            apiKey,
+          });
 
-        if (!validation.ok) {
-          throw new ProviderError("provider_validation_failed", validation.message);
+          if (!validation.ok) {
+            throw new ProviderError("provider_validation_failed", validation.message);
+          }
         }
 
         const entry: StoredProviderEntry = {
           model: request.model,
-          apiKey,
+          apiKeys,
           updatedAt: now().toISOString(),
         };
         const next: StoredProviderFile = {
@@ -125,7 +185,12 @@ export async function createProviderService(
 
         await writeStoredProviderConfig(options.appDataDir, next);
         state = next;
-        return toPublicConfig(next);
+
+        if (explicitApiKeys !== null || !keyPools.has(adapter.id)) {
+          keyPools.set(adapter.id, createProviderKeyPool(apiKeys, { now }));
+        }
+
+        return toPublicConfig(next, keysFor(adapter.id));
       };
 
       const current = writeTail.catch(() => undefined).then(run);

@@ -258,6 +258,7 @@ const providerConfig: ProviderConfig = {
   configured: true,
   updatedAt: timestamp,
   available: ["gemini"],
+  keys: [],
 };
 
 const providerRequest: ProviderConfigRequest = {

@@ -21,6 +21,7 @@ import {
   type InputExecutorOptions,
 } from "./input-executor";
 import type { ProviderRegistry } from "./provider-registry";
+import { providerKeyId } from "./provider-key-pool";
 import type { ProviderService } from "./provider-service";
 import {
   AgentError,
@@ -65,10 +66,12 @@ const defaultAction: AgentAction = {
   description: "Buka kontak",
 };
 
+const testProviderKey = "test-key";
+
 const activeProvider = {
   provider: "gemini" as const,
   model: "gemini-2.5-flash",
-  apiKey: "test-key",
+  apiKeys: [testProviderKey],
   updatedAt: fixedNow,
 };
 
@@ -79,14 +82,24 @@ const providers: ProviderService = {
     configured: true,
     updatedAt: fixedNow,
     available: ["gemini"],
+    keys: [],
   }),
   getActive: () => ({ ...activeProvider }),
+  acquireKey: () => ({
+    status: "selected",
+    keyId: providerKeyId(testProviderKey),
+    apiKey: testProviderKey,
+  }),
+  markKeyFailure() {
+    return undefined;
+  },
   setConfig: async () => ({
     provider: "gemini",
     model: activeProvider.model,
     configured: true,
     updatedAt: fixedNow,
     available: ["gemini"],
+    keys: [],
   }),
 };
 
@@ -1316,6 +1329,46 @@ describe("task runner", () => {
     expect(event.type).toBe("task.failed");
     if (event.type === "task.failed") {
       expect(event.reason).toBe(reason);
+    }
+  });
+
+  it("reports a cooldown with the nearest retry duration when every key is limited", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_provider_keys_cooldown", null, false, null, 125);
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Semua kunci provider sedang dibatasi. Coba lagi setelah 2 menit 5 detik.",
+      );
+    }
+  });
+
+  it("reports rejected keys when every key failed auth", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_provider_keys_rejected");
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Semua kunci provider ditolak. Periksa konfigurasi provider.",
+      );
     }
   });
 
