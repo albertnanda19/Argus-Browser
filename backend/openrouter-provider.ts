@@ -19,6 +19,18 @@ const GENERATE_INVALID_JSON_MESSAGE =
 const GENERATE_UNSUPPORTED_MESSAGE =
   "Pesan Stagehand tidak dapat dipetakan ke OpenRouter.";
 
+const MAX_FAILURE_BODY_BYTES = 16 * 1024;
+const MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60;
+const FAILURE_METADATA_PATTERN = /^[A-Za-z0-9_.:-]{1,100}$/;
+
+export type OpenRouterFailureMetadata = {
+  readonly httpStatus: number | null;
+  readonly retryAfterSeconds: number | null;
+  readonly errorType: string | null;
+  readonly providerCode: string | null;
+  readonly limitSource: string | null;
+};
+
 export type OpenRouterValidation = ProviderValidation;
 
 export type OpenRouterValidator = (
@@ -35,11 +47,25 @@ export type OpenRouterErrorCode =
 
 export class OpenRouterError extends Error {
   readonly code: OpenRouterErrorCode;
+  readonly httpStatus: number | null;
+  readonly retryAfterSeconds: number | null;
+  readonly errorType: string | null;
+  readonly providerCode: string | null;
+  readonly limitSource: string | null;
 
-  constructor(code: OpenRouterErrorCode, message: string) {
+  constructor(
+    code: OpenRouterErrorCode,
+    message: string,
+    metadata: Partial<OpenRouterFailureMetadata> = {},
+  ) {
     super(message);
     this.name = "OpenRouterError";
     this.code = code;
+    this.httpStatus = metadata.httpStatus ?? null;
+    this.retryAfterSeconds = metadata.retryAfterSeconds ?? null;
+    this.errorType = metadata.errorType ?? null;
+    this.providerCode = metadata.providerCode ?? null;
+    this.limitSource = metadata.limitSource ?? null;
   }
 }
 
@@ -100,6 +126,146 @@ function supportsStructuredOutput(value: unknown): boolean {
     Array.isArray(value.supported_parameters) &&
     value.supported_parameters.includes("structured_outputs")
   );
+}
+
+function emptyFailureMetadata(): OpenRouterFailureMetadata {
+  return {
+    httpStatus: null,
+    retryAfterSeconds: null,
+    errorType: null,
+    providerCode: null,
+    limitSource: null,
+  };
+}
+
+function sanitizeFailureValue(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  return FAILURE_METADATA_PATTERN.test(value) ? value : null;
+}
+
+function parseRetryAfter(value: string | null): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  const text = value.trim();
+  if (text.length === 0) {
+    return null;
+  }
+
+  if (/^\d+$/.test(text)) {
+    const seconds = Number.parseInt(text, 10);
+    if (!Number.isSafeInteger(seconds)) {
+      return null;
+    }
+    return Math.min(seconds, MAX_RETRY_AFTER_SECONDS);
+  }
+
+  if (!text.includes(":") || text.startsWith("-")) {
+    return null;
+  }
+
+  const timestamp = Date.parse(text);
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+
+  const seconds = Math.ceil((timestamp - Date.now()) / 1000);
+  if (seconds <= 0) {
+    return 0;
+  }
+  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS);
+}
+
+async function readFailureBody(response: Response): Promise<string | null> {
+  const stream = response.body;
+  if (stream === null) {
+    return null;
+  }
+
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = stream.getReader();
+  } catch {
+    return null;
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value === undefined) {
+        continue;
+      }
+      total += value.byteLength;
+      if (total > MAX_FAILURE_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    await reader.cancel().catch(() => undefined);
+    return null;
+  }
+
+  if (chunks.length === 0) {
+    return "";
+  }
+
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(body);
+}
+
+async function readFailureMetadata(
+  response: Response,
+): Promise<OpenRouterFailureMetadata> {
+  const metadata: OpenRouterFailureMetadata = {
+    ...emptyFailureMetadata(),
+    httpStatus: response.status,
+    retryAfterSeconds: parseRetryAfter(response.headers.get("Retry-After")),
+  };
+  const body = await readFailureBody(response);
+
+  if (body === null) {
+    return metadata;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return metadata;
+  }
+
+  if (!isObject(payload) || !isObject(payload.error)) {
+    return metadata;
+  }
+
+  const error = payload.error;
+  const details = isObject(error.metadata) ? error.metadata : undefined;
+
+  return {
+    ...metadata,
+    errorType:
+      sanitizeFailureValue(details?.error_type) ??
+      sanitizeFailureValue(error.type),
+    providerCode: sanitizeFailureValue(details?.provider_code),
+    limitSource: sanitizeFailureValue(details?.limit_source),
+  };
 }
 
 export async function validateOpenRouterCredentials(
@@ -238,7 +404,11 @@ export function createOpenRouterGenerate(input: {
     }
 
     if (!response.ok) {
-      throw new OpenRouterError("openrouter_generate_failed", GENERATE_FAILED_MESSAGE);
+      throw new OpenRouterError(
+        "openrouter_generate_failed",
+        GENERATE_FAILED_MESSAGE,
+        await readFailureMetadata(response),
+      );
     }
 
     let payload: unknown;

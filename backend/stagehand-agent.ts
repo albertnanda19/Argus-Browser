@@ -94,6 +94,7 @@ const KNOWN_PROVIDER_KEYS = [
   "retryDelaySeconds",
   "retryAfterSeconds",
   "quotaId",
+  "limitSource",
   "name",
   "message",
   "responseBody",

@@ -347,6 +347,187 @@ describe("OpenRouter generate callback", () => {
     expect(stub.calls).toHaveLength(1);
   });
 
+  it("captures sanitized failure metadata from a 402 response", async () => {
+    const bodyMarker = "raw-credit-message";
+    const stub = fetchStub(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: `${bodyMarker} ${apiKey}`,
+              type: "insufficient_credits",
+              metadata: {
+                error_type: "invalid_request_error",
+                provider_code: "openrouter.insufficient_credits",
+                limit_source: "openrouter_credits",
+              },
+            },
+          }),
+          { status: 402, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    const generate = createOpenRouterGenerate({
+      model,
+      apiKey,
+      fetch: stub.fetch,
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const error = await generate(generateRequest()).catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(OpenRouterError);
+    expect(error).toMatchObject({
+      code: "openrouter_generate_failed",
+      message: "Panggilan model OpenRouter gagal.",
+      httpStatus: 402,
+      retryAfterSeconds: null,
+      errorType: "invalid_request_error",
+      providerCode: "openrouter.insufficient_credits",
+      limitSource: "openrouter_credits",
+    });
+
+    const serialized = `${String(error)} ${JSON.stringify(error)}`;
+    expect(serialized).not.toContain(bodyMarker);
+    expect(serialized).not.toContain(apiKey);
+
+    const logged = [...log.mock.calls, ...warn.mock.calls, ...errorLog.mock.calls]
+      .flat()
+      .join(" ");
+    expect(logged).not.toContain(bodyMarker);
+    expect(logged).not.toContain(apiKey);
+  });
+
+  it("falls back to error.type and drops unsafe metadata values", async () => {
+    const stub = fetchStub(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              type: "safe_error_type",
+              metadata: {
+                error_type: "unsafe type",
+                provider_code: "provider code!",
+                limit_source: "openrouter_credits\n",
+              },
+            },
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    const generate = createOpenRouterGenerate({
+      model,
+      apiKey,
+      fetch: stub.fetch,
+    });
+
+    const error = await generate(generateRequest()).catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      httpStatus: 403,
+      errorType: "safe_error_type",
+      providerCode: null,
+      limitSource: null,
+    });
+  });
+
+  it("reads Retry-After seconds, HTTP dates, and caps the delay", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-29T00:00:00.000Z"));
+    const responses = [
+      new Response(null, { status: 429, headers: { "Retry-After": "20" } }),
+      new Response(null, {
+        status: 429,
+        headers: { "Retry-After": "Thu, 29 Oct 2026 01:00:00 GMT" },
+      }),
+      new Response(null, { status: 429, headers: { "Retry-After": "999999" } }),
+    ];
+    const stub = fetchStub(
+      () => responses.shift() ?? new Response(null, { status: 500 }),
+    );
+    const generate = createOpenRouterGenerate({
+      model,
+      apiKey,
+      fetch: stub.fetch,
+    });
+
+    const seconds = await generate(generateRequest()).catch((failure: unknown) => failure);
+    const date = await generate(generateRequest()).catch((failure: unknown) => failure);
+    const capped = await generate(generateRequest()).catch((failure: unknown) => failure);
+
+    expect(seconds).toMatchObject({ retryAfterSeconds: 20 });
+    expect(date).toMatchObject({ retryAfterSeconds: 3_600 });
+    expect(capped).toMatchObject({ retryAfterSeconds: 86_400 });
+  });
+
+  it.each(["soon", "-5", "20s"])(
+    "ignores an invalid Retry-After value %s",
+    async (value) => {
+      const stub = fetchStub(
+        () =>
+          new Response(null, {
+            status: 429,
+            headers: { "Retry-After": value },
+          }),
+      );
+      const generate = createOpenRouterGenerate({
+        model,
+        apiKey,
+        fetch: stub.fetch,
+      });
+
+      const error = await generate(generateRequest()).catch((failure: unknown) => failure);
+
+      expect(error).toMatchObject({
+        httpStatus: 429,
+        retryAfterSeconds: null,
+      });
+    },
+  );
+
+  it("keeps the HTTP status when the failure body is not JSON", async () => {
+    const bodyMarker = `provider denied ${apiKey}`;
+    const stub = fetchStub(() => new Response(bodyMarker, { status: 403 }));
+    const generate = createOpenRouterGenerate({
+      model,
+      apiKey,
+      fetch: stub.fetch,
+    });
+
+    const error = await generate(generateRequest()).catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      httpStatus: 403,
+      retryAfterSeconds: null,
+      errorType: null,
+      providerCode: null,
+      limitSource: null,
+    });
+    expect(`${String(error)} ${JSON.stringify(error)}`).not.toContain(apiKey);
+  });
+
+  it("keeps the HTTP status when the failure body exceeds the size limit", async () => {
+    const stub = fetchStub(
+      () => new Response("x".repeat(32 * 1024), { status: 402 }),
+    );
+    const generate = createOpenRouterGenerate({
+      model,
+      apiKey,
+      fetch: stub.fetch,
+    });
+
+    const error = await generate(generateRequest()).catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      httpStatus: 402,
+      retryAfterSeconds: null,
+      errorType: null,
+      providerCode: null,
+      limitSource: null,
+    });
+  });
+
   it("aborts a completion after sixty seconds without retrying", async () => {
     vi.useFakeTimers();
     const stub = fetchStub(

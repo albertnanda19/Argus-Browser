@@ -13,6 +13,7 @@ import type { StoredProviderConfig } from "./provider-store";
 import { createOpenRouterGenerate } from "./openrouter-provider";
 import type {
   AgentAction,
+  ClientModelGenerate,
   StagehandExtractSchema,
   StagehandRuntime,
   StagehandRuntimeFactory,
@@ -195,6 +196,40 @@ function createFixture(
         registry: createRegistry(options.adapter === undefined ? geminiAdapter : options.adapter),
         createRuntime: runtimeFactory,
       }),
+  };
+}
+
+function createOpenRouterFailureFixture(response: Response): AgentFixture {
+  const generate = createOpenRouterGenerate({
+    model: "nvidia/nemotron-3.5-super-vl:free",
+    apiKey: FAKE_API_KEY,
+    fetch: async () => response,
+  });
+
+  return createFixture({
+    getActive: () =>
+      activeConfig({
+        provider: "openrouter",
+        model: "nvidia/nemotron-3.5-super-vl:free",
+      }),
+    adapter: openRouterAdapter,
+    runtime: createRuntime({
+      async observe() {
+        await generate(openRouterGenerateRequest());
+        return [];
+      },
+    }),
+  });
+}
+
+function openRouterGenerateRequest(): Parameters<ClientModelGenerate>[0] {
+  return {
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "Continue" }],
+      },
+    ],
   };
 }
 
@@ -1088,6 +1123,129 @@ describe("provider cause", () => {
         kind: "credits_exhausted",
         httpStatus: 402,
         retryDelaySeconds: 60,
+      },
+    });
+
+    await agent.close();
+  });
+
+  it("maps an OpenRouter 402 with sanitized budget metadata to credits exhausted", async () => {
+    const bodyMarker = "raw-credit-body";
+    const fixture = createOpenRouterFailureFixture(
+      new Response(
+        JSON.stringify({
+          error: {
+            message: `${bodyMarker} ${FAKE_API_KEY}`,
+            metadata: { limit_source: "openrouter_credits" },
+          },
+        }),
+        { status: 402, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      code: "agent_observe_failed",
+      message: "Agent observe failed.",
+      providerCause: {
+        kind: "credits_exhausted",
+        httpStatus: 402,
+        retryDelaySeconds: null,
+        quotaId: null,
+      },
+    });
+    expect(`${String(error)} ${JSON.stringify(error)}`).not.toContain(bodyMarker);
+    expect(`${String(error)} ${JSON.stringify(error)}`).not.toContain(FAKE_API_KEY);
+
+    await agent.close();
+  });
+
+  it("maps an OpenRouter 403 with a key limit source to credits exhausted", async () => {
+    const fixture = createOpenRouterFailureFixture(
+      new Response(
+        JSON.stringify({
+          error: {
+            message: "Key limit exceeded.",
+            metadata: { limit_source: "openrouter_key_limit" },
+          },
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: {
+        kind: "credits_exhausted",
+        httpStatus: 403,
+      },
+    });
+
+    await agent.close();
+  });
+
+  it("keeps an OpenRouter 403 without a limit source as auth or key", async () => {
+    const fixture = createOpenRouterFailureFixture(
+      new Response(
+        JSON.stringify({ error: { message: "Forbidden." } }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: { kind: "auth_or_key", httpStatus: 403 },
+    });
+
+    await agent.close();
+  });
+
+  it("reads an OpenRouter 429 Retry-After into the rate limit cause", async () => {
+    const fixture = createOpenRouterFailureFixture(
+      new Response(
+        JSON.stringify({ error: { message: "Too many requests." } }),
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "20",
+          },
+        },
+      ),
+    );
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: {
+        kind: "rate_limited",
+        httpStatus: 429,
+        retryDelaySeconds: 20,
+      },
+    });
+
+    await agent.close();
+  });
+
+  it("maps an OpenRouter 500 to an upstream unavailable cause", async () => {
+    const fixture = createOpenRouterFailureFixture(
+      new Response(null, { status: 500 }),
+    );
+    const agent = await fixture.createAgent();
+
+    const error = await agent.observe("Continue").catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      providerCause: {
+        kind: "upstream_unavailable",
+        httpStatus: 500,
       },
     });
 
