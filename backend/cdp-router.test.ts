@@ -68,8 +68,9 @@ async function addClient(
   pipe: FakePipe,
   sink: CdpClientSink,
   browserSessionId: string,
+  options?: { readonly lifecycleOwner?: boolean },
 ) {
-  const promise = router.addClient(sink);
+  const promise = router.addClient(sink, options);
   await new Promise<void>((resolveTick) => setImmediate(resolveTick));
   const attach = pipe.sent.findLast((message) => message.method === "Target.attachToBrowserTarget");
   if (attach === undefined || attach.id === undefined) {
@@ -341,6 +342,217 @@ describe("createCdpRouter", () => {
       method: "Page.enable",
       sessionId: "page-explicit",
     });
+  });
+
+  it("supports the Playwright newCDPSession sequence on a client-owned session", async () => {
+    const pipe = createFakePipe();
+    const router = createCdpRouter(pipe.pipe);
+    const a = createSink();
+    const client = await addClient(router, pipe, a.sink, "browser-a");
+
+    client.send({ id: 50, method: "Target.attachToBrowserTarget", params: {} });
+    const browserAttach = pipe.sent.at(-1);
+    expect(browserAttach).toMatchObject({
+      method: "Target.attachToBrowserTarget",
+      params: {},
+    });
+    expect(browserAttach?.id).not.toBe(50);
+    expect(browserAttach?.sessionId).toBeUndefined();
+    pipe.emit({ id: browserAttach?.id, result: { sessionId: "browser-extra" } });
+    await flush();
+    expect(a.messages.at(-1)).toEqual({
+      id: 50,
+      result: { sessionId: "browser-extra" },
+    });
+
+    client.send({
+      id: 51,
+      method: "Target.attachToTarget",
+      params: { targetId: "target-1", flatten: true },
+      sessionId: "browser-extra",
+    });
+    const pageAttach = pipe.sent.at(-1);
+    expect(pageAttach).toMatchObject({
+      method: "Target.attachToTarget",
+      sessionId: "browser-extra",
+    });
+    expect(pageAttach?.id).not.toBe(51);
+    pipe.emit({
+      id: pageAttach?.id,
+      result: { sessionId: "page-extra" },
+      sessionId: "browser-extra",
+    });
+    await flush();
+    expect(a.messages.at(-1)).toEqual({
+      id: 51,
+      result: { sessionId: "page-extra" },
+      sessionId: "browser-extra",
+    });
+
+    client.send({ id: 52, method: "Page.enable", params: {}, sessionId: "page-extra" });
+    const enable = pipe.sent.at(-1);
+    expect(enable).toMatchObject({ method: "Page.enable", sessionId: "page-extra" });
+    pipe.emit({ id: enable?.id, result: {}, sessionId: "page-extra" });
+    await flush();
+    expect(a.messages.at(-1)).toEqual({ id: 52, result: {}, sessionId: "page-extra" });
+
+    client.send({
+      id: 53,
+      method: "Page.getLayoutMetrics",
+      params: {},
+      sessionId: "page-extra",
+    });
+    const metrics = pipe.sent.at(-1);
+    expect(metrics).toMatchObject({
+      method: "Page.getLayoutMetrics",
+      sessionId: "page-extra",
+    });
+    pipe.emit({
+      id: metrics?.id,
+      result: { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } },
+      sessionId: "page-extra",
+    });
+    await flush();
+    expect(a.messages.at(-1)).toEqual({
+      id: 53,
+      result: { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } },
+      sessionId: "page-extra",
+    });
+  });
+
+  it("keeps extra session responses and events away from other clients", async () => {
+    const pipe = createFakePipe();
+    const router = createCdpRouter(pipe.pipe);
+    const a = createSink();
+    const b = createSink();
+    const clientA = await addClient(router, pipe, a.sink, "browser-a");
+    const clientB = await addClient(router, pipe, b.sink, "browser-b");
+
+    clientA.send({ id: 60, method: "Target.attachToBrowserTarget", params: {} });
+    const browserAttach = pipe.sent.at(-1);
+    pipe.emit({ id: browserAttach?.id, result: { sessionId: "browser-extra" } });
+    await flush();
+    clientA.send({
+      id: 61,
+      method: "Target.attachToTarget",
+      params: { targetId: "target-1", flatten: true },
+      sessionId: "browser-extra",
+    });
+    const pageAttach = pipe.sent.at(-1);
+    pipe.emit({
+      id: pageAttach?.id,
+      result: { sessionId: "page-extra" },
+      sessionId: "browser-extra",
+    });
+    await flush();
+
+    const sentBefore = pipe.sent.length;
+    clientB.send({ id: 62, method: "Page.enable", params: {}, sessionId: "page-extra" });
+    await flush();
+    expect(pipe.sent.length).toBe(sentBefore);
+    expect(b.messages.at(-1)).toEqual({
+      id: 62,
+      error: { code: -32001, message: "Unknown CDP session." },
+    });
+
+    pipe.emit({ method: "Page.loadEventFired", sessionId: "page-extra", params: { timestamp: 1 } });
+    pipe.emit({
+      method: "Page.frameAttached",
+      sessionId: "browser-extra",
+      params: { frameId: "frame-1" },
+    });
+    await flush();
+
+    expect(a.messages.filter((message) => message.method === "Page.loadEventFired")).toEqual([
+      { method: "Page.loadEventFired", sessionId: "page-extra", params: { timestamp: 1 } },
+    ]);
+    expect(a.messages.filter((message) => message.method === "Page.frameAttached")).toEqual([
+      { method: "Page.frameAttached", sessionId: "browser-extra", params: { frameId: "frame-1" } },
+    ]);
+    expect(b.messages.filter((message) => message.method !== undefined)).toEqual([]);
+  });
+
+  it("allows the lifecycle owner to close the browser", async () => {
+    const pipe = createFakePipe();
+    const router = createCdpRouter(pipe.pipe);
+    const a = createSink();
+    const o = createSink();
+    const client = await addClient(router, pipe, a.sink, "browser-a");
+    const owner = await addClient(router, pipe, o.sink, "browser-owner", {
+      lifecycleOwner: true,
+    });
+
+    client.send({ id: 70, method: "Browser.close", params: {} });
+    await flush();
+    expect(pipe.sent.some((message) => message.method === "Browser.close")).toBe(false);
+    expect(a.messages.at(-1)).toEqual({
+      id: 70,
+      error: { code: -32601, message: "Method is reserved for the lifecycle owner." },
+    });
+
+    owner.send({ id: 71, method: "Browser.close", params: {} });
+    const forwarded = pipe.sent.at(-1);
+    expect(forwarded).toEqual({
+      id: expect.any(Number),
+      method: "Browser.close",
+      params: {},
+    });
+    pipe.emit({ id: forwarded?.id, result: {} });
+    await flush();
+    expect(o.messages.at(-1)).toEqual({ id: 71, result: {} });
+  });
+
+  it("disconnects a client with extra sessions without affecting another client", async () => {
+    const pipe = createFakePipe();
+    const router = createCdpRouter(pipe.pipe);
+    const a = createSink();
+    const b = createSink();
+    const clientA = await addClient(router, pipe, a.sink, "browser-a");
+    await addClient(router, pipe, b.sink, "browser-b");
+
+    clientA.send({ id: 80, method: "Target.attachToBrowserTarget", params: {} });
+    const browserAttach = pipe.sent.at(-1);
+    pipe.emit({ id: browserAttach?.id, result: { sessionId: "browser-extra" } });
+    await flush();
+    clientA.send({
+      id: 81,
+      method: "Target.attachToTarget",
+      params: { targetId: "target-1", flatten: true },
+      sessionId: "browser-extra",
+    });
+    const pageAttach = pipe.sent.at(-1);
+    pipe.emit({
+      id: pageAttach?.id,
+      result: { sessionId: "page-extra" },
+      sessionId: "browser-extra",
+    });
+    emitAttached(pipe, "browser-b", "page-b");
+    await flush();
+
+    const sentBefore = pipe.sent.length;
+    await clientA.close();
+
+    const detachedSessions = pipe.sent.slice(sentBefore).map((message) => {
+      const params = message.params;
+      return typeof params === "object" &&
+        params !== null &&
+        "sessionId" in params &&
+        typeof params.sessionId === "string"
+        ? params.sessionId
+        : "";
+    });
+    expect(detachedSessions.sort()).toEqual(["browser-a", "browser-extra", "page-extra"]);
+    expect(a.close).toHaveBeenCalledWith("client_closed");
+    expect(b.close).not.toHaveBeenCalled();
+    expect(pipe.close).not.toHaveBeenCalled();
+
+    pipe.emit({ method: "Page.loadEventFired", sessionId: "page-b", params: {} });
+    pipe.emit({ method: "Page.loadEventFired", sessionId: "page-extra", params: {} });
+    await flush();
+
+    expect(b.messages.filter((message) => message.method === "Page.loadEventFired")).toEqual([
+      { method: "Page.loadEventFired", sessionId: "page-b", params: {} },
+    ]);
   });
 
   it("removes ownership after Target.detachedFromTarget", async () => {

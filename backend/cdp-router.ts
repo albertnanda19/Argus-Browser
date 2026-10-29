@@ -8,7 +8,6 @@ const LIFECYCLE_METHODS = new Set([
   "Browser.close",
   "Browser.crash",
   "Browser.crashGpuProcess",
-  "Target.attachToBrowserTarget",
 ]);
 
 export type CdpRouterTransport = {
@@ -37,22 +36,26 @@ export type CdpRouterOptions = {
   readonly maxQueueMessages?: number;
 };
 
+export type CdpRouterClientOptions = {
+  readonly lifecycleOwner?: boolean;
+};
+
 export type CdpRouter = {
   readonly pid: number;
-  addClient(sink: CdpClientSink): Promise<CdpRouterClient>;
+  addClient(sink: CdpClientSink, options?: CdpRouterClientOptions): Promise<CdpRouterClient>;
   close(): Promise<void>;
 };
 
 type SessionRecord = {
   readonly clientId: string;
   readonly parent: string | null;
-  readonly isBrowser: boolean;
 };
 
 type ClientState = {
   readonly id: string;
   readonly sink: CdpClientSink;
   readonly browserSessionId: string;
+  readonly isLifecycleOwner: boolean;
   isClosed: boolean;
   queue: CdpWireMessage[];
   isFlushing: boolean;
@@ -159,8 +162,10 @@ export function createCdpRouter(
     clients.delete(client.id);
     clearPendingForClient(client.id);
 
+    const ownedSessionIds: string[] = [];
     for (const [sessionId, record] of sessions) {
       if (record.clientId === client.id) {
+        ownedSessionIds.push(sessionId);
         sessions.delete(sessionId);
       }
     }
@@ -170,13 +175,15 @@ export function createCdpRouter(
     } catch {}
 
     if (!isRouterClosed) {
-      try {
-        transport.send({
-          id: nextPipeId++,
-          method: "Target.detachFromTarget",
-          params: { sessionId: client.browserSessionId },
-        });
-      } catch {}
+      for (const sessionId of ownedSessionIds.reverse()) {
+        try {
+          transport.send({
+            id: nextPipeId++,
+            method: "Target.detachFromTarget",
+            params: { sessionId },
+          });
+        } catch {}
+      }
     }
 
     client.closePromise = Promise.resolve();
@@ -256,11 +263,14 @@ export function createCdpRouter(
     }
 
     const result = isRecord(message.result) ? message.result : {};
-    if (entry.method === "Target.attachToTarget" && typeof result.sessionId === "string") {
+    if (
+      (entry.method === "Target.attachToBrowserTarget" ||
+        entry.method === "Target.attachToTarget") &&
+      typeof result.sessionId === "string"
+    ) {
       sessions.set(result.sessionId, {
         clientId: client.id,
         parent: entry.sessionId,
-        isBrowser: false,
       });
     }
     if (entry.method === "Target.detachFromTarget" && entry.targetSessionId !== null) {
@@ -291,14 +301,13 @@ export function createCdpRouter(
           sessions.set(childSessionId, {
             clientId: parent.clientId,
             parent: envelope,
-            isBrowser: false,
           });
           const client = clients.get(parent.clientId);
           if (client !== undefined) {
             enqueue(client, {
               method: message.method,
               params: message.params,
-              ...(parent.isBrowser ? {} : { sessionId: envelope }),
+              ...(envelope === client.browserSessionId ? {} : { sessionId: envelope }),
             });
           }
           return;
@@ -312,14 +321,11 @@ export function createCdpRouter(
         const child = sessions.get(childSessionId);
         if (child !== undefined) {
           sessions.delete(childSessionId);
-          if (child.isBrowser) {
-            const client = clients.get(child.clientId);
-            if (client !== undefined) {
-              void closeClient(client, "cdp_detached");
-            }
+          const client = clients.get(child.clientId);
+          if (client !== undefined && childSessionId === client.browserSessionId) {
+            void closeClient(client, "cdp_detached");
             return;
           }
-          const client = clients.get(child.clientId);
           if (client !== undefined) {
             const parentEnvelope =
               child.parent === null || child.parent === client.browserSessionId
@@ -347,7 +353,7 @@ export function createCdpRouter(
     if (client === undefined) {
       return;
     }
-    if (record.isBrowser) {
+    if (envelope === client.browserSessionId) {
       enqueue(client, { method: message.method, params: message.params });
       return;
     }
@@ -414,7 +420,7 @@ export function createCdpRouter(
 
   const router: CdpRouter = {
     pid: transport.pid,
-    async addClient(sink) {
+    async addClient(sink, options = {}) {
       if (isRouterClosed) {
         throw new Error("CDP router is closed.");
       }
@@ -431,6 +437,7 @@ export function createCdpRouter(
         id: `c_${randomBytes(8).toString("hex")}`,
         sink,
         browserSessionId,
+        isLifecycleOwner: options.lifecycleOwner ?? false,
         isClosed: false,
         queue: [],
         isFlushing: false,
@@ -440,7 +447,6 @@ export function createCdpRouter(
       sessions.set(browserSessionId, {
         clientId: client.id,
         parent: null,
-        isBrowser: true,
       });
 
       return {
@@ -454,7 +460,8 @@ export function createCdpRouter(
           }
           const requestId = message.id;
           const method = message.method;
-          if (LIFECYCLE_METHODS.has(method)) {
+          const isLifecycleMethod = LIFECYCLE_METHODS.has(method);
+          if (isLifecycleMethod && !client.isLifecycleOwner) {
             enqueue(client, {
               id: requestId,
               error: {
@@ -465,7 +472,10 @@ export function createCdpRouter(
             return;
           }
 
-          let envelope: string | null = browserSessionId;
+          let envelope: string | null =
+            isLifecycleMethod || method === "Target.attachToBrowserTarget"
+              ? null
+              : browserSessionId;
           if (message.sessionId !== undefined) {
             const session = sessions.get(message.sessionId);
             if (session === undefined || session.clientId !== client.id) {
@@ -475,7 +485,7 @@ export function createCdpRouter(
               );
               return;
             }
-            envelope = session.isBrowser ? null : message.sessionId;
+            envelope = message.sessionId === browserSessionId ? null : message.sessionId;
           }
 
           const pipeId = nextPipeId++;

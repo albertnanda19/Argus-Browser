@@ -671,6 +671,43 @@ async function run(secrets: string[]): Promise<void> {
     );
     console.log("GATE b PASS Playwright navigate, click, and cookie write");
 
+    console.log("step 2b: Playwright context.newCDPSession(page)");
+    const cdpSession = await withTimeout(
+      context.newCDPSession(page),
+      15_000,
+      "Playwright CDP session creation timed out.",
+    );
+    const layout = await withTimeout(
+      cdpSession.send("Page.getLayoutMetrics"),
+      15_000,
+      "Page.getLayoutMetrics timed out.",
+    );
+    const viewport =
+      isRecord(layout) && isRecord(layout.cssLayoutViewport) ? layout.cssLayoutViewport : null;
+    const viewportWidth = viewport?.clientWidth;
+    const viewportHeight = viewport?.clientHeight;
+    assert(
+      typeof viewportWidth === "number" && viewportWidth > 0,
+      "Page.getLayoutMetrics returned no viewport width.",
+    );
+    assert(
+      typeof viewportHeight === "number" && viewportHeight > 0,
+      "Page.getLayoutMetrics returned no viewport height.",
+    );
+    const capture = await withTimeout(
+      cdpSession.send("Page.captureScreenshot", { format: "png", fromSurface: true }),
+      15_000,
+      "Page.captureScreenshot timed out.",
+    );
+    const screenshotData =
+      isRecord(capture) && typeof capture.data === "string" ? capture.data : "";
+    const screenshotBytes = Buffer.from(screenshotData, "base64").length;
+    assert(screenshotBytes > 0, "Page.captureScreenshot returned empty data.");
+    await withTimeout(cdpSession.detach(), 15_000, "Playwright CDP session detach timed out.");
+    console.log(
+      `GATE i PASS newCDPSession ${viewportWidth}x${viewportHeight}, screenshot ${screenshotBytes} bytes`,
+    );
+
     console.log("step 3: prove Chrome has no TCP CDP listener");
     await assertNoTcpCdp(first.pipe.pid);
     console.log("GATE a PASS no --remote-debugging-port, no --remote-allow-origins, no TCP listener");
