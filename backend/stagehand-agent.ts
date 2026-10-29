@@ -61,13 +61,26 @@ export type ProviderCause = {
   readonly quotaId: string | null;
 };
 
-const MAX_CAUSE_DEPTH = 3;
-const MAX_STRUCTURE_DEPTH = 10;
+const MAX_CAUSE_DEPTH = 6;
+const MAX_CAUSE_NODES = 50;
 const MAX_PROVIDER_JSON_LENGTH = 100_000;
 const MAX_RETRY_DELAY_SECONDS = 99_999_999;
 const NETWORK_ERROR_CODES = ["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN"];
 const QUOTA_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,100}$/;
+const RETRY_DELAY_TEXT_PATTERN =
+  /\bretry(?:\s+(?:in|after)|delay)\s*[:=]?\s*(\d{1,9})\s*s\b/i;
 const STATUS_KEYS = new Set(["status", "statuscode", "httpstatus"]);
+const CAUSE_LINK_KEYS = [
+  "cause",
+  "lastError",
+  "errors",
+  "error",
+  "originalError",
+  "details",
+  "response",
+  "data",
+  "responseBody",
+] as const;
 const RETRY_DELAY_KEYS = new Set([
   "retrydelay",
   "retryafter",
@@ -151,6 +164,16 @@ function parseRetryDelay(value: string): number | null {
   return Number.isSafeInteger(seconds) ? seconds : null;
 }
 
+function parseRetryDelayText(value: string): number | null {
+  const digits = RETRY_DELAY_TEXT_PATTERN.exec(value)?.[1];
+  if (digits === undefined) {
+    return null;
+  }
+
+  const seconds = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(seconds) ? seconds : null;
+}
+
 function inspectProviderScalar(
   value: string | number | boolean,
   key: string | null,
@@ -208,6 +231,13 @@ function inspectProviderScalar(
     }
   }
 
+  if (signals.retryDelaySeconds === null) {
+    const seconds = parseRetryDelayText(text);
+    if (seconds !== null) {
+      signals.retryDelaySeconds = seconds;
+    }
+  }
+
   const upperText = text.toUpperCase();
   if (upperText.includes("RESOURCE_EXHAUSTED") || upperText.includes("QUOTA")) {
     signals.hasQuota = true;
@@ -241,73 +271,124 @@ function parseProviderJson(text: string): unknown {
   }
 }
 
-function inspectProviderStructure(
+type ProviderNode = {
+  readonly value: unknown;
+  readonly key: string | null;
+  readonly depth: number;
+};
+
+function enqueueProviderNode(
+  queue: ProviderNode[],
   value: unknown,
   key: string | null,
   depth: number,
-  seen: Set<object>,
-  signals: ProviderSignals,
 ): void {
-  if (depth > MAX_STRUCTURE_DEPTH) {
-    return;
-  }
-
   if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    depth > MAX_CAUSE_DEPTH ||
+    queue.length >= MAX_CAUSE_NODES
   ) {
-    inspectProviderScalar(value, key, signals);
-    if (typeof value === "string") {
-      const parsed = parseProviderJson(value);
-      if (parsed !== undefined) {
-        inspectProviderStructure(parsed, key, depth + 1, seen, signals);
-      }
-    }
     return;
   }
-
-  if (value === null || typeof value !== "object" || seen.has(value)) {
-    return;
-  }
-  seen.add(value);
-
-  for (const knownKey of KNOWN_PROVIDER_KEYS) {
-    inspectProviderStructure(
-      readProviderProperty(value, knownKey),
-      knownKey,
-      depth + 1,
-      seen,
-      signals,
-    );
-  }
-
-  let entries: [string, unknown][];
-  try {
-    entries = Object.entries(value);
-  } catch {
-    return;
-  }
-
-  for (const [entryKey, entryValue] of entries) {
-    const normalizedKey = normalizeProviderKey(entryKey);
-    if (UNSCANNED_PROVIDER_KEYS.has(normalizedKey)) {
-      continue;
-    }
-    inspectProviderStructure(entryValue, entryKey, depth + 1, seen, signals);
-  }
+  queue.push({ value, key, depth });
 }
 
 function collectProviderSignals(error: unknown): ProviderSignals {
   const signals = emptyProviderSignals();
-  let current: unknown = error;
+  const seen = new Set<object>();
+  const queue: ProviderNode[] = [{ value: error, key: null, depth: 0 }];
+  let visited = 0;
 
-  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth += 1) {
-    inspectProviderStructure(current, null, 0, new Set<object>(), signals);
-    if (current === null || typeof current !== "object") {
+  while (queue.length > 0 && visited < MAX_CAUSE_NODES) {
+    const node = queue.shift();
+    if (node === undefined) {
       break;
     }
-    current = readProviderProperty(current, "cause");
+    visited += 1;
+
+    const { value, key, depth } = node;
+    if (typeof value === "string") {
+      inspectProviderScalar(value, key, signals);
+      const parsed = parseProviderJson(value);
+      if (parsed !== undefined) {
+        enqueueProviderNode(queue, parsed, key, depth);
+      }
+      continue;
+    }
+
+    if (typeof value === "number" || typeof value === "boolean") {
+      inspectProviderScalar(value, key, signals);
+      continue;
+    }
+
+    if (value === null || typeof value !== "object" || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        enqueueProviderNode(queue, entry, key, depth);
+      }
+      continue;
+    }
+
+    const handledKeys = new Set<string>();
+    for (const linkKey of CAUSE_LINK_KEYS) {
+      handledKeys.add(linkKey);
+      enqueueProviderNode(
+        queue,
+        readProviderProperty(value, linkKey),
+        linkKey,
+        depth + 1,
+      );
+    }
+
+    for (const knownKey of KNOWN_PROVIDER_KEYS) {
+      if (handledKeys.has(knownKey)) {
+        continue;
+      }
+      handledKeys.add(knownKey);
+      enqueueProviderNode(
+        queue,
+        readProviderProperty(value, knownKey),
+        knownKey,
+        depth,
+      );
+    }
+
+    let examinedEntries = 0;
+    try {
+      for (const entryKey in value) {
+        if (
+          examinedEntries >= MAX_CAUSE_NODES ||
+          queue.length >= MAX_CAUSE_NODES
+        ) {
+          break;
+        }
+        examinedEntries += 1;
+        if (!Object.prototype.hasOwnProperty.call(value, entryKey)) {
+          continue;
+        }
+        const normalizedKey = normalizeProviderKey(entryKey);
+        if (
+          handledKeys.has(entryKey) ||
+          UNSCANNED_PROVIDER_KEYS.has(normalizedKey)
+        ) {
+          continue;
+        }
+        const entryValue = readProviderProperty(value, entryKey);
+        const entryDepth =
+          typeof entryValue === "object" && entryValue !== null
+            ? depth + 1
+            : depth;
+        enqueueProviderNode(queue, entryValue, entryKey, entryDepth);
+      }
+    } catch {
+      continue;
+    }
   }
 
   return signals;
@@ -335,6 +416,9 @@ function resolveProviderKind(signals: ProviderSignals): ProviderCauseKind {
   }
   if (signals.httpStatus === 400 && signals.hasSchema) {
     return "schema_rejected";
+  }
+  if (signals.httpStatus === null && signals.hasQuota) {
+    return "quota_exhausted";
   }
   if (signals.hasNetworkCode) {
     return "network";

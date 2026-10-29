@@ -1151,6 +1151,32 @@ describe("task runner", () => {
     }
   });
 
+  it("reports the wrapped quota retry delay instead of the generic observe reason", async () => {
+    const harness = createRunnerHarness({
+      createAgent: async () => {
+        throw new AgentError("agent_observe_failed", "observe", false, {
+          kind: "quota_exhausted",
+          httpStatus: null,
+          retryDelaySeconds: 4_441,
+          quotaId: null,
+        });
+      },
+    });
+    const task = createTask(harness.tasks);
+    const terminal = waitForTerminal(harness.events, task.id);
+
+    harness.runner.start(task.id);
+    const event = await withDeadline(terminal);
+
+    expect(event.type).toBe("task.failed");
+    if (event.type === "task.failed") {
+      expect(event.reason).toBe(
+        "Kuota provider habis. Coba lagi sekitar 1 jam 14 menit 1 detik lagi atau ganti provider.",
+      );
+      expect(event.reason).not.toBe("Observasi halaman gagal.");
+    }
+  });
+
   it("reports quota exhaustion without a retry delay", async () => {
     const harness = createRunnerHarness({
       createAgent: async () => {
